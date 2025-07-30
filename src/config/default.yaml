@@ -1,0 +1,21 @@
+env_name: "drp_env:drp_safe-5agent_map_8x5-v2"
+agent_num: 5
+map_name: "8x5"
+
+task_assigner: "ppo"
+
+time_limit: 1000
+test_num: 1000
+
+n_envs: 8
+running_steps: 20000000
+buffer_size: 1024
+batch_size: 64
+epochs: 4
+
+learning_rate: 0.0003
+gamma: 0.99
+gae_lambda: 0.95
+clip_epsilon: 0.2
+entropy_coef: 0.0001
+value_loss_coef: 0.5

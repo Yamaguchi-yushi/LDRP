@@ -1,0 +1,28 @@
+import copy
+
+class TP():
+    def __init__(self):
+        pass
+
+    def assign_task(self, env, current_tasklist, assigned_tasklist):
+        current_tasklist = copy.deepcopy(current_tasklist)
+        assigned_tasklist = copy.deepcopy(assigned_tasklist)
+        task_assign = []
+
+        for i in range(env.agent_num):
+            best_task = -1
+            if len(assigned_tasklist[i]) == 0 and len(current_tasklist) > 0:
+                shortest_path_length = float('inf')
+
+                for j in range(len(current_tasklist)):
+                    path_length = env.get_path_length(env.goal_array[i], current_tasklist[j][0])
+
+                    if shortest_path_length > path_length:
+                        shortest_path_length = path_length
+                        best_task = j
+
+                current_tasklist.pop(best_task)
+
+            task_assign.append(best_task)
+                
+        return task_assign
