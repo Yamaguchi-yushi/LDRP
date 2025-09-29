@@ -1,5 +1,6 @@
 from src.task_assign.task_policy.fifo import FIFO
 from src.task_assign.task_policy.ppo import PPOAgent
+from src.task_assign.task_policy.ppo1 import PPOAgent_1
 from src.task_assign.task_policy.tp import TP
 
 class TaskAgent():
@@ -13,6 +14,9 @@ class TaskAgent():
         elif name == "ppo":
             print("call ppo")
             self.task_assigner = PPOAgent(args)
+        elif name == "ppo_v1":
+            print("call ppo_v1")
+            self.task_assigner = PPOAgent_1(args)
         else:
             raise ValueError(f"Unknown task assignment method: {name}")
 

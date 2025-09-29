@@ -3,6 +3,7 @@ agent_num: 5
 map_name: "8x5"
 
 task_assigner: "ppo"
+path_planner: "qmix"
 
 time_limit: 1000
 test_num: 1000

@@ -377,7 +377,7 @@ class DrpEnv(gym.Env):
 						r_i = self.r_goal
 						self.reach_account += 1
 					else: # stop at goal
-						r_i = 0   
+						r_i = 0
 						# self.distance_from_start[i] -= self.speed
 			
 				else: #at a general node 

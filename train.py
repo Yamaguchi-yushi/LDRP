@@ -11,7 +11,7 @@ if __name__ == "__main__":
     reward_list = {
         "goal": 100,
         "collision": -100,
-        "wait": -10.,
+        "wait": -1,
         "move": -1,
     }
 

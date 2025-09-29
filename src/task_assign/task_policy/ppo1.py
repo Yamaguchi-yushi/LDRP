@@ -53,13 +53,9 @@ class Buffer():
         self.rewards.append(reward)
         self.dones.append(done)
 
-    def rew_normalize(self):
-        if len(self.rewards) == 0:
-            return
-
-        mean = np.mean(self.rewards)
-        std = np.std(self.rewards) + 1e-8
-        self.rewards = [(r - mean) / std for r in self.rewards]
+    def normalize_rewards(self):
+        self.rewards = np.array(self.rewards, dtype=np.float32)
+        self.rewards = (self.rewards - np.mean(self.rewards)) / (np.std(self.rewards) + 1e-8)
 
     def compute_returns(self, gamma=0.99):
         returns = []
@@ -159,10 +155,18 @@ class PPO(nn.Module):
             nn.Linear(128, 1)
         )
 
+        self.apply(self.orthogonal_init)
+
     def forward(self, x):
         policy = self.policy_layer(x)
         value = self.value_layer(x)
         return policy, value
+    
+    def orthogonal_init(self,m):
+        if isinstance(m, nn.Linear):
+            init.orthogonal_(m.weight)
+            if m.bias is not None:
+                init.zeros_(m.bias)
 
     def save_model(self, path):
         # Implement model saving logic here
@@ -172,7 +176,7 @@ class PPO(nn.Module):
         # Implement model loading logic here
         pass
 
-class PPOAgent():
+class PPOAgent_1():
     def __init__(self, args):
         input_dim = args.agent_num * args.node_num * 2 + args.task_num * args.node_num + args.agent_num 
         output_dim = args.task_num * args.agent_num 
@@ -234,7 +238,7 @@ class PPOAgent():
         for i in range(env.n_agents):
             if any(len(task) == 0 for task in assigned_tasklist) and len_current_task > 0:
                 state = self.create_state(env, current_tasklist, assigned_tasklist)
-                state = torch.tensor(state, dtype=torch.float).to(self.device)
+                state = state.clone().detach().to(self.device)
                 policy, value = self.model(state)
                 #マスク
                 #task持ちのエージェント
@@ -333,7 +337,7 @@ class PPOAgent():
 
     #エピソード終了時の処理
     def process_end_episode(self):
-        self.buffer.rew_normalize()
+        self.buffer.normalize_rewards()
         self.buffer.compute_returns(self.args.gamma)
 
     def save_model(self, path):

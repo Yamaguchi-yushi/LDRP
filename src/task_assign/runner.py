@@ -99,7 +99,7 @@ class Runner():
                 #log
                 if step_tmp > self.check_interval:
                     print("Current step:", self.current_step)
-                    print("a_loss:", a_loss, "c_loss:", c_loss, "e_loss:", e_loss)
+                    print("a_loss:", a_loss.numpy(), "\nc_loss:", c_loss.numpy(), "\ne_loss:", e_loss.numpy())
                     print("Average task completion:", np.mean([info["task_completion"] for info in self.info_buffer]))
                     step_tmp = 0
 

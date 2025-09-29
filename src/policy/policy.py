@@ -11,7 +11,6 @@ def get_model_path(env):
 
     return path
 
-
 def policy(obs, env):
     global runner
 
@@ -30,3 +29,39 @@ def policy(obs, env):
         actions.append(action)
 
     return actions
+
+class MARLPolicy():
+    def __init__(self, args):
+        self.args = args
+        self.path_planner = args.path_planner
+        self.runner = None
+
+    def get_model_path(self, env):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        filename = f"{env.map_name}_{env.agent_num}_{self.path_planner}.th"
+        path = os.path.join(base_dir, "models", filename)
+
+        return path
+    
+    def policy(self, obs, env):
+
+        if self.runner is None:
+            self.runner = PolicyRunner(
+                model_path=get_model_path(env),
+                input_shape=len(obs[0]),
+                n_actions=env.n_actions,
+                agent_num=env.agent_num
+            )
+        
+        actions = []
+        for agi in range(env.agent_num):
+            _, avail_actions = env.get_avail_agent_actions(agi, env.n_actions)
+            action = self.runner.get_action(agi, obs[agi], avail_actions)
+            actions.append(action)
+
+        return actions
+    
+    #policyをまとめるクラスをつくる
+    #pbsかmarlかなど
+    #
+    #
