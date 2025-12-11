@@ -227,6 +227,7 @@ class MapMake():
 		plt.cla() #clear axis not plt
 
 	def get_avail_action_fun(self, obs_i, current_start, current_goal, goal_i):
+
 		#if s==self.pos[goal_i] and goal_i==0:
 		if [obs_i[0],obs_i[1]]==self.pos[goal_i]:
 			#return ['null']
@@ -270,7 +271,8 @@ class MapMake():
 
 				if distance_ij<5:
 					collision_flag = 1
-					print('!!!collision!!! with agent',i,j)
+					#print(pos_i, pos_j)
+					#print('!!!collision!!! with agent',i,j)
 		
 		return collision_flag
 
@@ -307,6 +309,17 @@ class MapMake():
 			path_length = None
 					 
 		return path_length
+
+	def get_near_nodes(self, node_num):
+		# ノード0からの距離を取得
+		lengths = nx.single_source_dijkstra_path_length(self.G, source=node_num, weight='weight')
+
+		# 近い順に並び替え
+		sorted_nodes = sorted(lengths.items(), key=lambda x: x[1])
+		nearest_nodes = [node for node, dist in sorted_nodes]
+
+		return nearest_nodes
+
 
 """
 if __name__ == '__main__':

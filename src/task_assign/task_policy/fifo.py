@@ -1,7 +1,35 @@
+import copy
+
 class FIFO():
     def __init__(self):
         pass
 
+    def assign_task(self, env):
+        current_tasklist = copy.deepcopy(env.current_tasklist)
+        assigned_list = copy.deepcopy(env.assigned_list)
+        assigned_tasks = copy.deepcopy(env.assigned_tasks)
+        task_assign = []
+        #current_tasklist = [current_tasklist[i] for i, task in enumerate(assigned_tasks) if task == -1]
+        #print("1:",current_tasklist)
+        #print("2:",assigned_list)
+        #print("3:",assigned_tasks)
+
+        task_idx = 0
+        for i in range(env.agent_num):
+            if assigned_tasks[i] == [] and len(current_tasklist)-task_idx > 0 :
+                while task_idx < len(current_tasklist):
+                    if assigned_list[task_idx] == -1:
+                        task_assign.append(task_idx)
+                        task_idx += 1
+                        break
+                    else:
+                        task_idx += 1
+            else:
+                task_assign.append(-1)
+
+        return task_assign
+
+    """
     def assign_task(self, env, current_tasklist, assigned_tasklist):
         task_assign = []
         current_tasklist = current_tasklist.copy()
@@ -18,3 +46,4 @@ class FIFO():
 
 
         return task_assign
+    """

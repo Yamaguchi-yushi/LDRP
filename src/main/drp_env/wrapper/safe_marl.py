@@ -17,7 +17,7 @@ class SafeEnv(DrpEnv):
 		task_assign = None
 		if isinstance(joint_action, dict):
 			task_assign = joint_action.get("task", None)
-			joint_action = joint_action.get("agent", joint_action)
+			joint_action = joint_action.get("pass", joint_action)
 
 		i = 0
 		do = True
@@ -43,7 +43,7 @@ class SafeEnv(DrpEnv):
 							do = True
 							break
 
-		joint_action = {"agent": joint_action, "task": task_assign} if task_assign is not None else joint_action
+		joint_action = {"pass": joint_action, "task": task_assign} if task_assign is not None else joint_action
 		obs, ri_array, self.terminated, info = super().step(joint_action)
 
 		return obs, ri_array, self.terminated, info

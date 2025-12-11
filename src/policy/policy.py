@@ -1,12 +1,14 @@
 import os
 from .policy_runner import PolicyRunner
+import torch
+import numpy as np
 
 runner = None
 
 
 def get_model_path(env):
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    filename = f"{env.map_name}_{env.agent_num}.th"
+    filename = f"{env.map_name}_{env.agent_num}_qmix.th"
     path = os.path.join(base_dir, "models", filename)
 
     return path
@@ -35,19 +37,23 @@ class MARLPolicy():
         self.args = args
         self.path_planner = args.path_planner
         self.runner = None
-
+    
     def get_model_path(self, env):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         filename = f"{env.map_name}_{env.agent_num}_{self.path_planner}.th"
         path = os.path.join(base_dir, "models", filename)
 
         return path
+
     
     def policy(self, obs, env):
+        #vdnとiqlは以下が必要（agent_idをつけてしまったため）
+        #identity = np.eye(env.agent_num)
+        #obs = np.concatenate([obs, identity], axis=1)
 
         if self.runner is None:
             self.runner = PolicyRunner(
-                model_path=get_model_path(env),
+                model_path=self.get_model_path(env),
                 input_shape=len(obs[0]),
                 n_actions=env.n_actions,
                 agent_num=env.agent_num
@@ -61,7 +67,3 @@ class MARLPolicy():
 
         return actions
     
-    #policyをまとめるクラスをつくる
-    #pbsかmarlかなど
-    #
-    #

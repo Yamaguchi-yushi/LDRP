@@ -80,7 +80,8 @@ class DrpEnv(gym.Env):
 		# flag for tasklist
 		self.is_tasklist = task_flag
 		self.current_tasklist=[]
-		self.assigned_tasks=[]
+		self.assigned_tasks=[]#エージェントが割り当てられたタスク(未ピックを含む)
+		self.assigned_list=[]#未実行のタスクとエージェントの割り当て表
 		self.task_num = self.agent_num*2 # for tasklist, each agent can have 2 tasks at most
 		#for rendering
 		#if self.is_tasklist:
@@ -120,6 +121,7 @@ class DrpEnv(gym.Env):
 		if self.is_tasklist:
 			self.goal_array = copy.deepcopy(self.start_ori_array)
 			self.current_tasklist=[]
+			self.assigned_list=[]
 			#self.assigned_tasks[i] is a task assigned to agent i
 			self.assigned_tasks=[[] for _ in range(self.agent_num)] 
 			self.alltasks = self.ee_env.create_tasklist(self.time_limit, self.agent_num, 1)
@@ -127,7 +129,6 @@ class DrpEnv(gym.Env):
 		#initialize obs
 		self.obs = tuple(np.array([self.pos[self.start_ori_array[i]][0], self.pos[self.start_ori_array[i]][1], self.start_ori_array[i], self.goal_array[i]]) for i in range(self.agent_num))
 		self.obs_current_chache = copy.deepcopy(self.obs)# used for calculating reward
-		
 		#initialize obs_one-hot
 		self.obs_onehot = np.zeros((self.agent_num, self.n_nodes*2))
 		for i in range(self.agent_num):
@@ -157,9 +158,11 @@ class DrpEnv(gym.Env):
 
 	def step(self, joint_action):
 
+		#print("tasks",self.current_tasklist)
+
 		if isinstance(joint_action, dict):
 			task_assign = joint_action.get("task", None)
-			joint_action = joint_action.get("agent", joint_action)
+			joint_action = joint_action.get("pass", joint_action)
 
 		#transite env based on joint_action
 		self.step_account += 1
@@ -186,6 +189,8 @@ class DrpEnv(gym.Env):
 			elif self.pos[int(action_i)][0]==self.obs[i][0] and self.pos[int(action_i)][1]==self.obs[i][1]:
 				self.obs_prepare.append(self.obs_current_chache[i])
 				self.wait_count[i] += 1
+				#pbsのため，その場待機でもcurrent_goalをNoneのままでないように変更
+				#self.current_goal_prepare[i] = action_i
 			# if available ⇢ obs_prepare update by obs_i_
 			else:
 				#self.joint_action_old[i] = joint_action[i]
@@ -280,7 +285,6 @@ class DrpEnv(gym.Env):
 				#print("!!!all reach goal!!!")
 				# info
 				info["goal"] = True
-			
 			else:
 				pass
 
@@ -292,10 +296,12 @@ class DrpEnv(gym.Env):
 				if len(self.current_tasklist) < self.task_num:
 					new_task = self.alltasks[self.step_account-1][i]
 					self.current_tasklist.append(new_task)
+					self.assigned_list.append(-1) # -1 means unassigned
+
 			# remove the task from the list if it has been completed
 			for i in range(self.agent_num):
 				pos_agenti = [self.obs[i][0],self.obs[i][1]]
-				if len(self.assigned_tasks[i])>0:
+				if self.assigned_tasks[i] != []:
 					if str(pos_agenti)==str(self.pos[self.goal_array[i]]):
 						if self.goal_array[i] == self.assigned_tasks[i][1]:
 							self.assigned_tasks[i] = [] # remove the task from assigned_tasks
@@ -303,31 +309,40 @@ class DrpEnv(gym.Env):
 						
 			# assign tasks to agents
 			for i in range(self.agent_num):
-				if self.assigned_tasks[i] == [] and task_assign[i] != -1:
+				if (self.assigned_tasks[i] == [] or i in self.assigned_list) and task_assign[i] != -1:
 					self.assigned_tasks[i] = self.current_tasklist[task_assign[i]]
-
-			# update current_tasklist
-			task_assign = [x for x in task_assign if x != -1]
-			for index in sorted(task_assign, reverse=True):
-				self.current_tasklist.pop(index)
+					self.goal_array[i] = self.assigned_tasks[i][0] # update goal to pick node
+					self.assigned_list[task_assign[i]] = i # update assigned_list
 
 			# update agent's start and goal
 			for i in range(self.agent_num):
 				pos_agenti = [self.obs[i][0],self.obs[i][1]]
 				if len(self.assigned_tasks[i])>0:
 					if str(pos_agenti)==str(self.pos[self.goal_array[i]]):
+						#when agent i reach the pick node
 						if self.goal_array[i]==self.assigned_tasks[i][0]:
 							self.start_ori_array[i] = self.goal_array[i]
 							self.goal_array[i] = self.assigned_tasks[i][1]
-						else:
+							try:
+								idx = self.assigned_list.index(i)
+								self.current_tasklist.pop(idx)
+								self.assigned_list.pop(idx)
+							except ValueError:
+								print("ValueError: agent ", i, " 's assigned task is not in the current_tasklist")
+						#when agent i reach the drop node
+						elif self.goal_array[i]==self.assigned_tasks[i][1]:
 							self.start_ori_array[i] = self.goal_array[i]
-							self.goal_array[i] = self.assigned_tasks[i][0]
+							#self.goal_array[i] = self.assigned_tasks[i][0]
+						else:
+							print(self.goal_array[i], self.assigned_tasks[i])
+							raise ValueError("Error in task execution")
+						
+				self.obs_prepare[i] = [self.obs[i][0], self.obs[i][1], self.start_ori_array[i], self.goal_array[i]]
+				self.obs_onehot[i] = np.zeros((1, len(list(self.G.nodes()))*2))
+				self.obs_onehot[i][int(self.current_start[i])] = 1
+				self.obs_onehot[i][int(self.goal_array[i])+len(list(self.G.nodes()))] = 1
 
-						self.obs_prepare[i] = [self.obs[i][0], self.obs[i][1], self.start_ori_array[i], self.goal_array[i]]
-						self.obs = tuple([np.array(i) for i in self.obs_prepare])
-						self.obs_onehot[i] = np.zeros((1, len(list(self.G.nodes()))*2))
-						self.obs_onehot[i][int(self.start_ori_array[i])] = 1
-						self.obs_onehot[i][int(self.goal_array[i])+len(list(self.G.nodes()))] = 1
+			self.obs = tuple([np.array(i) for i in self.obs_prepare])
 
 		obs = self.obs_manager.calc_obs()
 
@@ -420,7 +435,9 @@ class DrpEnv(gym.Env):
 			self.taskgui.show_tasklist(
 				self.agent_num, 
 				self.assigned_tasks, 
-				self.current_tasklist)
+				self.current_tasklist,
+				self.assigned_list
+				)
 		
 
 	def close(self):
@@ -451,3 +468,15 @@ class DrpEnv(gym.Env):
 			return 0
 		else:
 			return self.ee_env.get_path_length(start, goal)
+		
+	def get_near_nodes(self, node_num):
+		return self.ee_env.get_near_nodes(node_num)
+
+	def set_1agent_info(self, pos, current_start, current_goal, goal_array):
+		self.obs = tuple(np.array([pos[0], pos[1], self.obs[0][2], self.obs[0][3]]) for _ in range(1))
+		self.current_start[0] = current_start
+		self.current_goal[0] = current_goal
+		self.goal_array[0] = goal_array
+		self.step_account = 0
+
+		return

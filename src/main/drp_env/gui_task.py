@@ -57,12 +57,15 @@ class GUI_tasklist():
 
             self.assigned_task_listbox.insert(tk.END, f"agetn{i}: {task[0]} -> {task[1]}")
 
-    def populate_task_listbox(self, current_tasklist):
+    def populate_task_listbox(self, current_tasklist, assigned_list):
         self.task_listbox.delete(0, tk.END)
-        for task in current_tasklist:
-            self.task_listbox.insert(tk.END, f"{task[0]} -> {task[1]}")
+        for i in range(len(current_tasklist)):
+            if assigned_list[i] == -1:
+                self.task_listbox.insert(tk.END, f"{current_tasklist[i][0]} -> {current_tasklist[i][1]}")
+            else:
+                self.task_listbox.insert(tk.END, f"{current_tasklist[i][0]} -> {current_tasklist[i][1]} : assigned to agent{assigned_list[i]}")
 
-    def show_tasklist(self, agent_num, assigned_tasklist, current_tasklist):
+    def show_tasklist(self, agent_num, assigned_tasklist, current_tasklist, assigned_list):
         self.populate_assigned_task_listbox(agent_num, assigned_tasklist)
-        self.populate_task_listbox(current_tasklist)
+        self.populate_task_listbox(current_tasklist, assigned_list)
         self.root.update_idletasks()

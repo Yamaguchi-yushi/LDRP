@@ -6,16 +6,16 @@ from src.task_assign.task_policy.tp import TP
 class TaskAgent():
     def __init__(self, name, args=None):
         if name == "fifo":
-            print("call fifo")
+            #print("call fifo")
             self.task_assigner = FIFO()
         elif name == "tp":
-            print("call TP")
+            #print("call TP")
             self.task_assigner = TP()
         elif name == "ppo":
-            print("call ppo")
+            #print("call ppo")
             self.task_assigner = PPOAgent(args)
         elif name == "ppo_v1":
-            print("call ppo_v1")
+            #print("call ppo_v1")
             self.task_assigner = PPOAgent_1(args)
         else:
             raise ValueError(f"Unknown task assignment method: {name}")
@@ -23,4 +23,4 @@ class TaskAgent():
     def assign_task(self, env, task_info):
         current_tasklist = task_info["Tasks"]
         assigned_tasklist = task_info["Assigned"]
-        return self.task_assigner.assign_task(env, current_tasklist, assigned_tasklist)
+        return self.task_assigner.assign_task(env)

@@ -1,40 +1,31 @@
-import yaml
-import gym
-import sys
-import datetime
-import numpy as np
-from argparse import Namespace
-from src.task_assign.runner import Runner
+import subprocess
+import time
+"""
+command = [
+    ["python3", "test.py", "map_5x4", "3", "pbs", "tp"]
+]
+"""
+command = [
+'python3 src/main.py --config=iql --env-config=gymma with env_args.time_limit=100 env_args.key="drp_env:drp_safe-4agent_map_8x5-v2" env_args.state_repre_flag="onehot_fov" > train_results/qmix_drp_safe-4agent_map_8x5-v2.txt 2>&1'
+]
 
+num_runs = 10
+maxpurocesses = 5
+running_processes = []
 
-if __name__ == "__main__":
-    reward_list = {
-        "goal": 100,
-        "collision": -100,
-        "wait": -1,
-        "move": -1,
-    }
+for i in range(num_runs):
+    #algとmap，実行回数確認
+    command = f'python3 src/epymarl/src/main.py --config=iql --env-config=gymma with env_args.time_limit=100 env_args.key="drp_env:drp_safe-4agent_map_aoba00-v2" env_args.state_repre_flag="onehot_fov" > train_results/{i} 2>&1'
+    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    running_processes.append(proc)
 
-    with open("./src/config/default.yaml", 'r') as file:
-        config_dict = yaml.safe_load(file)
-    config = Namespace(**config_dict)
+    while len(running_processes) >= maxpurocesses:
+        for p in running_processes[:]:
+            if p.poll() is not None:
+                running_processes.remove(p)
+        time.sleep(0.1)
 
-    env_name = config.env_name#"drp_env:drp-" + str(config.drone_num) + "agent_map_" + config.map_name + "-v2"
+for p in running_processes:
+    p.wait()
 
-    env = gym.make(
-        env_name,
-        state_repre_flag="onehot_fov",
-        reward_list=reward_list,
-        time_limit=config.time_limit,
-        task_flag=True
-    )
-    """
-    with open("./config/algo/" + config.algo + ".yaml", 'r') as file:
-        config_dict = yaml.safe_load(file)
-    config = Namespace(**config_dict)
-    """
-
-    print("train start",datetime.datetime.now())
-    runner = Runner(config, env, reward_list, training=True)
-    runner.run()
-    runner.finish()
+print("All runs completed.")

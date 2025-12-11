@@ -5,8 +5,10 @@ import math
 import os
 import matplotlib.pyplot as plt
 from copy import deepcopy
+import time
 
 from src.policy.policy import policy
+from src.policy.policy_manager import PolicyManager 
 from src.task_assign.task_agent import TaskAgent
 
 class Runner():
@@ -36,6 +38,7 @@ class Runner():
         args.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
         self.info_buffer = deque(maxlen=self.test_num)
+        self.path_planner = PolicyManager(self.args)
         self.task_Agent = TaskAgent(self.args.task_assigner, self.args)
 
     def get_avail_actions(self):
@@ -53,11 +56,20 @@ class Runner():
         task_info = {"Tasks": [], "Assigned": [[] for _ in range(self.env.n_agents)]}
         episode_score = 0
         env_step = 0
+
+        #行動のログ
+        #"""
+        action_log = [[] for _ in range(self.env.n_agents)]
+        #"""
         
         while not done:
-            agents_action = policy(obs_n, self.env)
+            agents_action = self.path_planner.policy(obs_n, self.env)
+            #agents_action = policy(obs_n, self.env)
+            for i in range(self.env.n_agents):
+                action_log[i].append(agents_action[i])
+
             task_assign = self.task_Agent.assign_task(self.env, task_info)
-            joint_action = {"agent": agents_action, "task": task_assign}
+            joint_action = {"pass": agents_action, "task": task_assign}
 
             #self.env.render()
             #input()
@@ -75,6 +87,19 @@ class Runner():
                             
             env_step += 1
             obs_n = deepcopy(next_obs_n)
+            #"""
+            if 1==1:
+                print("############################")
+                print("step:", env_step)
+                print("current_start:", self.env.current_start)
+                print("current_goal:", self.env.current_goal)
+                print("goal_array:", self.env.goal_array)
+                #print("current_tasklist:", self.env.current_tasklist)
+                #print("assigned_tasks:", self.env.assigned_tasks)
+                #print("assigned_list:", self.env.assigned_list)
+                print("agents_action:", agents_action)
+                #print("task_assign:", task_assign)
+            #"""
 
         return episode_score, env_step, info
 
@@ -93,6 +118,7 @@ class Runner():
                 self.task_Agent.task_assigner.process_end_episode()
 
                 #training
+                
                 if self.task_Agent.task_assigner.update_ready():
                     a_loss, c_loss, e_loss = self.task_Agent.task_assigner.update()
                 
@@ -102,17 +128,22 @@ class Runner():
                     print("a_loss:", a_loss.numpy(), "\nc_loss:", c_loss.numpy(), "\ne_loss:", e_loss.numpy())
                     print("Average task completion:", np.mean([info["task_completion"] for info in self.info_buffer]))
                     step_tmp = 0
+                
 
             self.test_mode = True
-            self.task_Agent.task_assigner.set_test_mode(True)
 
 
+        times = []
+        self.info_buffer = deque(maxlen=self.test_num)
         if self.test_mode:
-            self.info_buffer = deque(maxlen=self.test_num)
-            for _ in range(self.test_num):
+            for i in range(self.test_num):
+                start = time.perf_counter()
                 episode_score, env_step, info = self.run_episode()
+                end = time.perf_counter()
                 self.info_buffer.append(info)
                 #print(info["goal_account"])
+
+                times.append(end - start)
 
         steps = [info["step"] for info in self.info_buffer]
         goal_account = [info["goal_account"] for info in self.info_buffer]
@@ -121,6 +152,10 @@ class Runner():
         print("Total test episodes:", len(self.info_buffer))
         print("Average steps:", np.mean(steps))
         print("Average task completion:", np.mean(task_completion))
+        print("最高値:",np.max(task_completion))
+        print("最低値:",np.min(task_completion))
+        print("実行時間:", np.sum(times), "秒")
+        print("平均実行時間:", np.mean(times), "秒")
 
         return
 

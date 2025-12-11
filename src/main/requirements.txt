@@ -1,3 +1,4 @@
-gym
-matplotlib
-networkx
+gym==0.26.2
+matplotlib==3.8.2
+networkx==3.2.1
+
