@@ -35,7 +35,7 @@ command = [
 ]
 """
 command = [
-    ["python3", "test.py", "map_5x4", "3", "pbs", "tp"]
+    ["python3", "test.py", "map_aoba00", "4", "pbs", "tp"]
 ]
 
 """

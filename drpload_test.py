@@ -16,14 +16,15 @@ env=gym.make("drp_env:drp-2agent_map_3x3-v2",
              goal_array = [3,6],
              task_flag = False)
 """
-env=gym.make("drp_env:drp-3agent_map_5x4-v2", 
+#pbsのtest用の場合，設定ファイルも変える
+env=gym.make("drp_env:drp-3agent_map_aoba01-v2", 
              state_repre_flag = "onehot_fov", 
              task_flag = False)
 #"""
 
 n_obs=env.reset()
-print("n_obs", n_obs)
-print(env.obs)
+#print("n_obs", n_obs)
+#print(env.obs)
 #print("action_space", env.action_space)
 #print("observation_space", env.observation_space)
 
@@ -38,16 +39,16 @@ PBS_agent = PBS(args)
 #PBS_agent.culc_actions(n_obs, env)
 
 print("obs", env.start_ori_array, env.goal_array)
-print("actions", PBS_agent.schedule_actions)
 
-
-for _ in range(50):
+for _ in range(100):
     #env.render()
     #time.sleep(0.5)
     #input()
     print("step", env.step_account)
 
     actions = PBS_agent.policy(n_obs, env)
+
+    #print("actions", actions)
     n_obs, reward, done, info = env.step(actions)
 
     if all(done):
