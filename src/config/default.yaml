@@ -10,7 +10,7 @@ path_planner: "pbs"
 time_limit: 500
 #time_limit: 30
 
-test_num: 1
+test_num: 300
 
 n_envs: 8
 running_steps: 20000000

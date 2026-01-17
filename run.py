@@ -1,5 +1,6 @@
 import subprocess
 import time
+import os
 
 map_name = [
     "map_5x4",
@@ -25,7 +26,7 @@ task_assigner = [
     "fifo",
     "tp",
 ]
-"""
+#"""
 command = [
     ["python3", "test.py", str(i), str(j), str(k), str(l)]
     for i in map_name
@@ -37,7 +38,7 @@ command = [
 command = [
     ["python3", "test.py", "map_aoba00", "4", "pbs", "tp"]
 ]
-
+"""
 """
 for cmd in command:
     with open("logs/" + str(cmd[2]) + "_" + str(cmd[3]) + "_" + str(cmd[4]) + "_" + str(cmd[5]) + ".txt", "w") as f:
@@ -47,6 +48,23 @@ for cmd in command:
 maxpurocesses = 5
 running_processes = []
 
+#logファイルのパス変更ver
+for cmd in command:
+    log_dir = "logs/" + str(cmd[2])
+    os.makedirs(log_dir, exist_ok=True)
+    with open(log_dir + "/" + str(cmd[2]) + "_" + str(cmd[3]) + "_" + str(cmd[4]) + "_" + str(cmd[5]) + ".txt", "w") as f:
+        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
+    running_processes.append((proc ,cmd))
+
+    while len(running_processes) >= maxpurocesses:
+        for p,c in running_processes[:]:
+            if p.poll() is not None:
+                print("Finished:", c)
+                running_processes.remove((p,c))
+        time.sleep(0.1)
+
+#ver2
+"""
 for cmd in command:
     with open("logs/" + str(cmd[2]) + "_" + str(cmd[3]) + "_" + str(cmd[4]) + "_" + str(cmd[5]) + ".txt", "w") as f:
         proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
@@ -58,6 +76,7 @@ for cmd in command:
                 print("Finished:", c)
                 running_processes.remove((p,c))
         time.sleep(0.1)
+"""
 
 for p, c in running_processes:
     p.wait()

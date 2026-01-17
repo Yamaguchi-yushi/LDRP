@@ -87,7 +87,7 @@ class Runner():
                             
             env_step += 1
             obs_n = deepcopy(next_obs_n)
-            #"""
+            """
             if 1==1:
                 #print("############################")
                 print("step:", env_step)
@@ -100,7 +100,7 @@ class Runner():
                 print("agents_action:", agents_action)
                 #print("task_assign:", task_assign)
                 print("############################")
-            #"""
+            """
 
         return episode_score, env_step, info
 
