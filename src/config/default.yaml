@@ -1,16 +1,16 @@
-env_name: "drp_env:drp_safe-3agent_map_aoba01-v2"
+env_name: "drp_env:drp_safe-4agent_map_8x5-v2"
 #env_name: "drp_env:drp-5agent_map_8x5-v2"
 
-agent_num: 3
-map_name: "map_aoba01"
+agent_num: 4
+map_name: "map_8x5"
 
 task_assigner: "tp"
-path_planner: "pbs"
+path_planner: "qmix"
 
-time_limit: 500
+time_limit: 1000
 #time_limit: 30
 
-test_num: 300
+test_num: 1000
 
 n_envs: 8
 running_steps: 20000000

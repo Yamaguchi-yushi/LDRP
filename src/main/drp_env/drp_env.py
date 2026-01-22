@@ -190,7 +190,7 @@ class DrpEnv(gym.Env):
 				self.obs_prepare.append(self.obs_current_chache[i])
 				self.wait_count[i] += 1
 				#pbsのため，その場待機でもcurrent_goalをNoneのままでないように変更
-				self.current_goal_prepare[i] = action_i
+				#self.current_goal_prepare[i] = action_i
 			# if available ⇢ obs_prepare update by obs_i_
 			else:
 				#self.joint_action_old[i] = joint_action[i]

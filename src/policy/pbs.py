@@ -27,6 +27,7 @@ class PBS:
         self.time_limit = 100#args.time_limit
         self.schedule_actions = []
         self.goal_rec = []
+        self.priority_rec = []
 
 
     #優先度を決める，ゴールまでの距離が長いものを優先（優先度リストを作る）
@@ -42,7 +43,6 @@ class PBS:
         #AAAA
         #tmp = 0
         self.schedule_actions = [[] for _ in range(self.num_agents)]
-        self.goal_rec = env.goal_array.copy()
         #今：step × agent_num
         #other_agents_infos = OtherAgentsInfo(other_agents_pos=[[] for _ in range(self.time_limit - env.step_account)])
         #改：agent_num × step
@@ -56,8 +56,10 @@ class PBS:
         self.fill_non_nodes_agents_pos_history(env, other_agents_infos)
         
         priority_list = self.get_priority(obs, env)
+        self.priority_rec = priority_list.copy()
         index = 0
         recal_count = 0
+        #print("priority_list", priority_list)
         while index < len(priority_list):
             i = priority_list[index]
             index += 1
@@ -77,11 +79,13 @@ class PBS:
                 if len(near_goal_nodes) == 0:
                     priority_list.remove(i)
                     priority_list.insert(0, i)
+                    self.priority_rec = priority_list.copy()
+                    #print("priority_list", priority_list)
                     index = 0
                     recal_count += 1
                     
                     if recal_count >= self.num_agents:
-                        print("再計算回数超過")
+                        #print("再計算回数超過")
                         if env.current_goal[i] is not None:
                             self.schedule_actions = [[env.current_goal[i]] * self.time_limit for _ in range(self.num_agents)]
                         else:
@@ -93,6 +97,7 @@ class PBS:
                     self.fill_non_nodes_agents_pos_history(env, other_agents_infos)
                     break
                 tmp_goal = near_goal_nodes.pop(0)
+                #print("agent", i, "try goal", tmp_goal)
                 
                 #tmp_goal = current_startのとき
                 #他のエージェントがcurrent_startを通る場合，あとからこの処理をすると衝突
@@ -200,6 +205,7 @@ class PBS:
             #print(other_agents_infos.other_agents_pos)
         #AAAA
         #print(tmp)
+        self.goal_rec = env.goal_array.copy()
 
     ###############################################
     def fill_non_nodes_agents_pos_history(self, env, other_agents_infos: OtherAgentsInfo) -> None:
@@ -236,28 +242,47 @@ class PBS:
                     )
 
                 #占有しすぎてしまう
-                #agent_info.pos_history.extend([agent_info.pos_history[-1]] * (self.time_limit + 1))
+                #agent_info.pos_history.extend([agent_info.pos_history[-1]] * (self.time_limit - len(agent_info.pos_history) + 1))
+                #agent_info.pos_history.extend([agent_info.pos_history[-1]]*1)
                 agent_info.pos_history.extend([] for _ in range(self.time_limit - len(agent_info.pos_history) + 1))
 
                 other_agents_infos.other_agents_pos[i] = agent_info.pos_history
 
     ###############################################
-    
+    #以前の優先度を残し，継承，ゴールを変更したエージェントを最後に追加
     def get_priority(self, obs, env):
         priority_list = []
         for i in range(self.num_agents):
             #エッジ上のエージェントへの対応（未）
             path_length = env.get_path_length(env.current_start[i], env.goal_array[i])
             priority_list.append((i, path_length))
-        
         #遠いものを優先
         #priority_list.sort(key=lambda x: x[1], reverse=True)
         #近いものを優先
         priority_list.sort(key=lambda x: x[1], reverse=False)
-
         priority_list = [x[0] for x in priority_list]
-
         return priority_list
+        """
+        if self.priority_rec == []:
+            for i in range(self.num_agents):
+                #エッジ上のエージェントへの対応（未）
+                path_length = env.get_path_length(env.current_start[i], env.goal_array[i])
+                priority_list.append((i, path_length))
+            #遠いものを優先
+            #priority_list.sort(key=lambda x: x[1], reverse=True)
+            #近いものを優先
+            priority_list.sort(key=lambda x: x[1], reverse=False)
+            priority_list = [x[0] for x in priority_list]
+            return priority_list
+        else:
+            priority_list = self.priority_rec.copy()
+            if env.goal_array != self.goal_rec:
+                for i in range(self.num_agents):
+                    if env.goal_array[i] != self.goal_rec[i]:
+                        priority_list.remove(i)
+                        priority_list.append(i)
+            return priority_list
+        """
     
     #エージェントのxy座標(self.obs)環境にセットする
     #obs=tuple(array[],array[]...)

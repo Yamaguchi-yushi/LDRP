@@ -56,6 +56,10 @@ class Runner():
         task_info = {"Tasks": [], "Assigned": [[] for _ in range(self.env.n_agents)]}
         episode_score = 0
         env_step = 0
+        #実験用
+        tmp_step = 0
+        tmp_goal = self.env.goal_array.copy()
+        self.tmp_flag = False
 
         #行動のログ
         #"""
@@ -81,14 +85,23 @@ class Runner():
 
             #報酬をバッファへ
             if self.training:
-                    self.task_Agent.task_assigner.buffer_add_rewards(sum(rew_n), done)
+                self.task_Agent.task_assigner.buffer_add_rewards(sum(rew_n), done)
 
             episode_score += np.mean(rew_n)
                             
             env_step += 1
             obs_n = deepcopy(next_obs_n)
-            """
-            if 1==1:
+
+            if self.env.goal_array != tmp_goal:
+                tmp_goal = self.env.goal_array.copy()
+                tmp_step = 0
+            else:
+                tmp_step += 1
+            if tmp_step > 40:
+                self.tmp_flag = True
+
+            #"""
+            if 1==0:
                 #print("############################")
                 print("step:", env_step)
                 print("current_start:", self.env.current_start)
@@ -100,7 +113,7 @@ class Runner():
                 print("agents_action:", agents_action)
                 #print("task_assign:", task_assign)
                 print("############################")
-            """
+            #"""
 
         return episode_score, env_step, info
 
@@ -135,21 +148,32 @@ class Runner():
 
 
         times = []
+        tmp_list = []
         self.info_buffer = deque(maxlen=self.test_num)
         if self.test_mode:
             for i in range(self.test_num):
                 start = time.perf_counter()
                 episode_score, env_step, info = self.run_episode()
                 end = time.perf_counter()
+
                 self.info_buffer.append(info)
                 #print(info["goal_account"])
+                tmp_list.append(self.tmp_flag)
 
                 times.append(end - start)
+                #if (i+1) % 10 == 0:
+                #    print(f"Test Episode {i+1}/{self.test_num} completed.")
 
         steps = [info["step"] for info in self.info_buffer]
         goal_account = [info["goal_account"] for info in self.info_buffer]
         task_completion = [info["task_completion"] for info in self.info_buffer]
+        full_completion = [info["task_completion"] for info in self.info_buffer if not info["collision"]]
+        non_lock_completion = [info["task_completion"] for idx, info in enumerate(self.info_buffer) if tmp_list[idx]==False]
 
+        #print(full_completion)
+        #print("衝突なし:",np.mean(full_completion),len(full_completion))
+        #print(non_lock_completion)
+        #print("ロックなし", np.mean(non_lock_completion), len(non_lock_completion))
         print("Total test episodes:", len(self.info_buffer))
         print("Average steps:", np.mean(steps))
         print("Average task completion:", np.mean(task_completion))

@@ -1,6 +1,7 @@
 import subprocess
 import time
 import os
+import time
 
 map_name = [
     "map_5x4",
@@ -16,10 +17,10 @@ agent_num = [
 ]
 
 path_planner = [
-    #"iql",
-    #"qmix",
+    "iql",
+    "qmix",
     #"vdn",
-    "pbs",
+    #"pbs",
 ]
 
 task_assigner = [
@@ -50,11 +51,12 @@ running_processes = []
 
 #logファイルのパス変更ver
 for cmd in command:
-    log_dir = "logs/" + str(cmd[2])
+    log_dir = "logs/" + str(cmd[2]) + "/safe"
     os.makedirs(log_dir, exist_ok=True)
     with open(log_dir + "/" + str(cmd[2]) + "_" + str(cmd[3]) + "_" + str(cmd[4]) + "_" + str(cmd[5]) + ".txt", "w") as f:
         proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
     running_processes.append((proc ,cmd))
+    print("Started:", cmd, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
     while len(running_processes) >= maxpurocesses:
         for p,c in running_processes[:]:

@@ -26,8 +26,8 @@ if __name__ == "__main__":
         config.path_planner = sys.argv[3]
         config.task_assigner = sys.argv[4]
 
-    env_name = "drp_env:drp-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
-    #env_name = "drp_env:drp_safe-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
+    #env_name = "drp_env:drp-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
+    env_name = "drp_env:drp_safe-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
 
     env = gym.make(
         env_name,
