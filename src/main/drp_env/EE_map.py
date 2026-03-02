@@ -24,7 +24,7 @@ UNREAL_MAP = [
 class MapMake():
 
 	def __init__(self, agent_num, start_ori_array, goal_array, map_name):
-		print('MapMake initialized')
+		#print('MapMake initialized')
 		self.agent_num = agent_num
 
 		base_nodes = [0,2]
@@ -43,7 +43,8 @@ class MapMake():
 			self.close()
 			sys.exit(0)
 		else:
-			print('Mal Environment initialized')
+			pass
+			#print('Mal Environment initialized')
 
 		#print('Agent numbers', self.agent_num)
 

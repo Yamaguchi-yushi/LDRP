@@ -3,7 +3,7 @@ from src.task_assign.task_policy.ppo import PPOAgent
 from src.task_assign.task_policy.ppo1 import PPOAgent_1
 from src.task_assign.task_policy.tp import TP
 
-class TaskAgent():
+class TaskManager():
     def __init__(self, name, args=None):
         if name == "fifo":
             #print("call fifo")
@@ -20,7 +20,5 @@ class TaskAgent():
         else:
             raise ValueError(f"Unknown task assignment method: {name}")
 
-    def assign_task(self, env, task_info):
-        current_tasklist = task_info["Tasks"]
-        assigned_tasklist = task_info["Assigned"]
+    def assign_task(self, env):
         return self.task_assigner.assign_task(env)

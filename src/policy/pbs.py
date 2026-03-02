@@ -28,6 +28,7 @@ class PBS:
         self.schedule_actions = []
         self.goal_rec = []
         self.priority_rec = []
+        self.tmp_goal_rec = []
 
 
     #優先度を決める，ゴールまでの距離が長いものを優先（優先度リストを作る）
@@ -59,7 +60,7 @@ class PBS:
         self.priority_rec = priority_list.copy()
         index = 0
         recal_count = 0
-        #print("priority_list", priority_list)
+        print("priority_list", priority_list)
         while index < len(priority_list):
             i = priority_list[index]
             index += 1
@@ -80,7 +81,7 @@ class PBS:
                     priority_list.remove(i)
                     priority_list.insert(0, i)
                     self.priority_rec = priority_list.copy()
-                    #print("priority_list", priority_list)
+                    print("priority_list", priority_list)
                     index = 0
                     recal_count += 1
                     
@@ -343,9 +344,9 @@ class PBS:
             self.schedule_actions = []
 
         if self.schedule_actions == []:
-            #print("新たに計算")
+            print("新たに計算")
             self.culc_actions(obs, env)
-            #print("schedule_actions", self.schedule_actions)
+            print("schedule_actions", self.schedule_actions)
             #return [0 for _ in range(self.num_agents)]
             
         for i in range(self.num_agents):

@@ -6,10 +6,11 @@ import os
 import matplotlib.pyplot as plt
 from copy import deepcopy
 import time
+import sys
 
 from src.policy.policy import policy
 from src.policy.policy_manager import PolicyManager 
-from src.task_assign.task_agent import TaskAgent
+from src.task_assign.task_manager import TaskManager
 
 class Runner():
     def __init__(self, args, env, reward_list, training=False):
@@ -39,7 +40,7 @@ class Runner():
 
         self.info_buffer = deque(maxlen=self.test_num)
         self.path_planner = PolicyManager(self.args)
-        self.task_Agent = TaskAgent(self.args.task_assigner, self.args)
+        self.task_manager = TaskManager(self.args.task_assigner, self.args)
 
     def get_avail_actions(self):
         avail_actions = []
@@ -53,7 +54,6 @@ class Runner():
 
         obs_n = self.env.reset()
         done = False
-        task_info = {"Tasks": [], "Assigned": [[] for _ in range(self.env.n_agents)]}
         episode_score = 0
         env_step = 0
         #実験用
@@ -61,31 +61,22 @@ class Runner():
         tmp_goal = self.env.goal_array.copy()
         self.tmp_flag = False
 
-        #行動のログ
-        #"""
-        action_log = [[] for _ in range(self.env.n_agents)]
-        #"""
+        
         
         while not done:
             agents_action = self.path_planner.policy(obs_n, self.env)
             #agents_action = policy(obs_n, self.env)
-            for i in range(self.env.n_agents):
-                action_log[i].append(agents_action[i])
 
-            task_assign = self.task_Agent.assign_task(self.env, task_info)
+            task_assign = self.task_manager.assign_task(self.env)
             joint_action = {"pass": agents_action, "task": task_assign}
 
-            #self.env.render()
-            #input()
-
             next_obs_n, rew_n, terminated_n, info = self.env.step(joint_action)
-            task_info = {"Tasks": self.env.current_tasklist, "Assigned": self.env.assigned_tasks}
             
             done = all(terminated_n)
 
             #報酬をバッファへ
             if self.training:
-                self.task_Agent.task_assigner.buffer_add_rewards(sum(rew_n), done)
+                self.task_manager.task_assigner.buffer_add_rewards(sum(rew_n), done)
 
             episode_score += np.mean(rew_n)
                             
@@ -101,7 +92,10 @@ class Runner():
                 self.tmp_flag = True
 
             #"""
-            if 1==0:
+            if done and info["collision"]:
+                sys.exit()
+
+            if 1==1:
                 #print("############################")
                 print("step:", env_step)
                 print("current_start:", self.env.current_start)
@@ -161,8 +155,8 @@ class Runner():
                 tmp_list.append(self.tmp_flag)
 
                 times.append(end - start)
-                #if (i+1) % 10 == 0:
-                #    print(f"Test Episode {i+1}/{self.test_num} completed.")
+                if (i+1) % 10 == 0:
+                    print(f"Test Episode {i+1}/{self.test_num} completed.")
 
         steps = [info["step"] for info in self.info_buffer]
         goal_account = [info["goal_account"] for info in self.info_buffer]
