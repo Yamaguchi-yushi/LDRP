@@ -51,11 +51,11 @@ pip install -r ./src/main/LDRP/requirements.txt
 ## 学習方法，モデルの適用について
 epymarlを利用して学習したモデルを利用可能
 
-`src/all_policy/policy.py`でモデルのパスやファイル名を自身で指定可能
+`src/all_policy/policy.py`内の`MARLPolicy`クラスでモデルのパスやファイル名を自身で指定することで利用可能
 
 ## drp_env.pyの変更箇所について
 
-- pbsのために200行目を変更した点は強化学習の際に影響があるかもしれない
+- pbsのために200行目を変更した点は強化学習の際に影響があるかもしれないため注意
 - 継続型の問題の際には，エージェントが目的地についている状態でもエージェントの`avail_actions`がゴールノードに固定されないように変更
 
 ## pbsについて

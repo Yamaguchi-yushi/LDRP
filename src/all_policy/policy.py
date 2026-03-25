@@ -40,7 +40,6 @@ class MARLPolicy():
     
     def get_model_path(self, env):
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        filename = f"{env.map_name}_{self.path_planner}.th"
         filename = f"{env.map_name}_{env.agent_num}_{self.path_planner}.th"
         path = os.path.join(base_dir, "models", "safe", filename)
 
