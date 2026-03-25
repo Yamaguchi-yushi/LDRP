@@ -34,7 +34,8 @@ if __name__ == "__main__":
         state_repre_flag="onehot_fov",
         reward_list=reward_list,
         time_limit=config.time_limit,
-        task_flag=True
+        task_flag=True,
+        task_list=None,
     )
     """
     with open("./config/algo/" + config.algo + ".yaml", 'r') as file:

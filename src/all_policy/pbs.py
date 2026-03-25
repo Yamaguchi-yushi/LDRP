@@ -1,6 +1,7 @@
 import gym
 import math
 import numpy as np
+import random
 from typing import Tuple, List
 from dataclasses import dataclass
 from collections import deque
@@ -28,10 +29,12 @@ class PBS:
         self.schedule_actions = []
         self.goal_rec = []
         self.priority_rec = []
-        self.tmp_goal_rec = []
+        self.change_rec = [] #ノード上にいるエージェントを記録するリスト（優先度の変更に使う）
+        self.no_change_rec = [] #エッジ上にいるエージェントを記録
+        self.tmp_goal_rec = [-1 for _ in range(self.num_agents)]
 
 
-    #優先度を決める，ゴールまでの距離が長いものを優先（優先度リストを作る）
+    #優先度を決める（優先度リストを作る）
     #優先度順に最短経路を決定
     #最短経路の求め方
     #環境の初期化（goal_arrayの設定）
@@ -60,7 +63,7 @@ class PBS:
         self.priority_rec = priority_list.copy()
         index = 0
         recal_count = 0
-        print("priority_list", priority_list)
+        #print("priority_list", priority_list)
         while index < len(priority_list):
             i = priority_list[index]
             index += 1
@@ -78,19 +81,31 @@ class PBS:
                 #agent_num回再計算したらどうする？
                 #current_goalに固定，Noneならcurrent_start
                 if len(near_goal_nodes) == 0:
+                    """
+                    if i in self.change_rec:
+                        self.change_rec.remove(i)
+                        self.change_rec.insert(0, i)
+                    elif i in self.no_change_rec:
+                        self.no_change_rec.remove(i)
+                        self.no_change_rec.insert(0,i)
+                    
+                    priority_list = self.change_rec.copy() + self.no_change_rec.copy()
+                    """
+
                     priority_list.remove(i)
-                    priority_list.insert(0, i)
+                    priority_list.insert(0,i)
                     self.priority_rec = priority_list.copy()
-                    print("priority_list", priority_list)
+                    #print("priority_list", priority_list)
                     index = 0
                     recal_count += 1
                     
                     if recal_count >= self.num_agents:
-                        #print("再計算回数超過")
-                        if env.current_goal[i] is not None:
-                            self.schedule_actions = [[env.current_goal[i]] * self.time_limit for _ in range(self.num_agents)]
-                        else:
-                            self.schedule_actions = [[env.current_start[i]] * self.time_limit for _ in range(self.num_agents)]
+                        #print("再計算回数超過",i)
+                        for j in range(self.num_agents):
+                            if env.current_goal[j] is not None:
+                                self.schedule_actions[j] = [env.current_goal[j]] * self.time_limit
+                            else:
+                                self.schedule_actions[j] = [env.current_start[j]] * self.time_limit
                     else:
                         self.schedule_actions = [[] for _ in range(self.num_agents)]
                     other_agents_infos = OtherAgentsInfo(other_agents_pos=[[[] for _ in range(self.time_limit + 1)]
@@ -99,18 +114,6 @@ class PBS:
                     break
                 tmp_goal = near_goal_nodes.pop(0)
                 #print("agent", i, "try goal", tmp_goal)
-                
-                #tmp_goal = current_startのとき
-                #他のエージェントがcurrent_startを通る場合，あとからこの処理をすると衝突
-                #計算の短縮だが無くす？
-                """
-                if agent_info.current_start == tmp_goal and agent_info.pos == (env.pos[agent_info.current_start][0], env.pos[agent_info.current_start][1]):
-                    self.schedule_actions[i] = [tmp_goal] * self.time_limit
-                    for _ in range(self.time_limit+1):
-                        agent_info.pos_history.append(agent_info.pos_history[-1])
-                    other_agents_infos.other_agents_pos[i] = agent_info.pos_history
-                    continue
-                """
 
                 agent_infos_deque = deque([agent_info])
                 current_agent_info = agent_info
@@ -131,6 +134,7 @@ class PBS:
                         visitted_states = set()
                         step_account_check = current_agent_info.step_account
 
+                    self.env.reset()
                     self.set_env_info(current_agent_info, tmp_goal)
 
                     avail_actions = self.env.get_avail_agent_actions(0, self.env.n_actions)[1]
@@ -147,8 +151,10 @@ class PBS:
                         visitted_states.add(new_state)
 
                         collision_flag = self.collision_detect(new_pos, other_agents_infos.other_agents_pos, current_agent_info.step_account+1, i)
-                        if collision_flag == True:#衝突とゴールが同時の場合にバグが起こるため
-                            self.env.reset()
+                        
+                        if collision_flag == True:#衝突とゴールが同時の場合にバグが起こるためリセット
+                            #self.env.reset()
+                            pass
 
                         elif collision_flag == False:
                             new_action_history = current_agent_info.action_history + [action]
@@ -205,9 +211,10 @@ class PBS:
             ###
             #print(other_agents_infos.other_agents_pos)
         #AAAA
-        #print(tmp)
+        #print(other_agents_infos.other_agents_pos)
         self.goal_rec = env.goal_array.copy()
-
+        self.tmp_goal_rec = [self.schedule_actions[i][-1] for i in range(self.num_agents)]
+        
     ###############################################
     def fill_non_nodes_agents_pos_history(self, env, other_agents_infos: OtherAgentsInfo) -> None:
 
@@ -242,19 +249,18 @@ class PBS:
                         step_account=0,
                     )
 
-                #占有しすぎてしまう
-                #agent_info.pos_history.extend([agent_info.pos_history[-1]] * (self.time_limit - len(agent_info.pos_history) + 1))
-                #agent_info.pos_history.extend([agent_info.pos_history[-1]]*1)
+                agent_info.pos_history.extend([agent_info.pos_history[-1]]*1)
                 agent_info.pos_history.extend([] for _ in range(self.time_limit - len(agent_info.pos_history) + 1))
 
                 other_agents_infos.other_agents_pos[i] = agent_info.pos_history
 
     ###############################################
-    #以前の優先度を残し，継承，ゴールを変更したエージェントを最後に追加
     def get_priority(self, obs, env):
         priority_list = []
+        change_list = []#ノード上にいるエージェントを記録するリスト
+        no_change_list = []
+        """
         for i in range(self.num_agents):
-            #エッジ上のエージェントへの対応（未）
             path_length = env.get_path_length(env.current_start[i], env.goal_array[i])
             priority_list.append((i, path_length))
         #遠いものを優先
@@ -264,9 +270,9 @@ class PBS:
         priority_list = [x[0] for x in priority_list]
         return priority_list
         """
+        #ノード上にいるエージェントを最後に追加
         if self.priority_rec == []:
             for i in range(self.num_agents):
-                #エッジ上のエージェントへの対応（未）
                 path_length = env.get_path_length(env.current_start[i], env.goal_array[i])
                 priority_list.append((i, path_length))
             #遠いものを優先
@@ -277,13 +283,19 @@ class PBS:
             return priority_list
         else:
             priority_list = self.priority_rec.copy()
-            if env.goal_array != self.goal_rec:
-                for i in range(self.num_agents):
-                    if env.goal_array[i] != self.goal_rec[i]:
-                        priority_list.remove(i)
-                        priority_list.append(i)
+            no_change_list = self.priority_rec.copy()
+            for i in range(self.num_agents):
+                if env.pos[env.current_start[i]] == [env.obs[i][0], env.obs[i][1]]:
+                    priority_list.remove(i)
+                    priority_list.append(i)
+                    change_list.append(i)
+                    no_change_list.remove(i)
+
+            self.change_rec = change_list.copy()
+            self.no_change_rec = no_change_list.copy()
+            
             return priority_list
-        """
+        
     
     #エージェントのxy座標(self.obs)環境にセットする
     #obs=tuple(array[],array[]...)
@@ -296,6 +308,7 @@ class PBS:
     
     #衝突判定
     #step_tのときに，agent_posとother_agents_posが衝突するか
+    #1ステップ前後も見ることで，取り替えるエージェントとの衝突を防ぐ
     def collision_detect(self, agent_pos, other_agents_pos, step_t, agent_num):
         speed = 5
         collision_flag = False
@@ -305,13 +318,18 @@ class PBS:
                 continue
             
             distance = math.dist(agent_pos, other_agents_pos[i][step_t])
-            if distance<speed:
+            distance_before = math.dist(agent_pos, other_agents_pos[i][step_t-1])
+            distance_after = speed+1
+            if len(other_agents_pos[i])>step_t+1 and other_agents_pos[i][step_t+1] != []:
+                distance_after = math.dist(agent_pos, other_agents_pos[i][step_t+1])
+
+            if distance<speed or distance_before<speed or distance_after<speed:
                 collision_flag = True
 
         return collision_flag
     
     #passを見つけた後，その後に衝突する恐れがないか確認
-    #今はpassの間だけの判断=>その後全ても見るように変更
+    #2ステップだけ確認
     def check_after_collision(self, agent_info, other_agents_pos, agent_num):
         collision_flag = False
         """
@@ -320,7 +338,7 @@ class PBS:
                 collision_flag = True
                 break
         """
-        for t in range(len(agent_info.pos_history), self.time_limit + 1):
+        for t in range(len(agent_info.pos_history), len(agent_info.pos_history)+2):
             if self.collision_detect(agent_info.pos_history[-1], other_agents_pos, t,  agent_num):
                 collision_flag = True
                 break
@@ -336,17 +354,24 @@ class PBS:
                     break
             
         #だれかのゴールが変わったとき，計算し直す
-        #ゴール付近のノードで妥協している場合，いつ再計算をするか
-        #案1：tmpで途中のものを指定した時，そこについたら再計算
-        ##その場に止まるものは除く
-        #now案2：なくなるまで実行，ただし，時間いっぱいまで衝突しないように計算
         if self.goal_rec != env.goal_array:
             self.schedule_actions = []
 
+        #ゴール付近のノードで妥協している場合，いつ再計算をするか
+        #案1：tmpで途中のものを指定した時，そこについたら再計算：だれかのcurrent_startがtmp_goalと一致した時
+        ##その場に止まるものは除かない（除いたほうがいいかも）
+        for i in range(self.num_agents):
+            if env.current_start[i] == self.tmp_goal_rec[i]:
+                self.schedule_actions = []
+                break
+
+        #案2：なくなるまで実行：なにも書かない
+        
+
         if self.schedule_actions == []:
-            print("新たに計算")
+            #print("新たに計算")
             self.culc_actions(obs, env)
-            print("schedule_actions", self.schedule_actions)
+            #print("schedule_actions", self.schedule_actions)
             #return [0 for _ in range(self.num_agents)]
             
         for i in range(self.num_agents):

@@ -1,6 +1,6 @@
 import copy
 
-class FIFO():
+class Random():
     def __init__(self):
         pass
 

@@ -1,5 +1,5 @@
 import gym
-from policy.policy import policy
+from all_policy.policy import policy
 # from example.policy_prfl import policy
 
 def policy_evaluation(policy, drone_num, map_name, reward_list, start, goal, render):

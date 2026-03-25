@@ -62,11 +62,8 @@ class MapMake():
 		
 		self.base_nodes = base_nodes
 
-		#print('Start node for each agent', self.start_ori_array)
-		#print('Goal node for each agent', self.goal_array)
-
-		#self.start1_ori,self.goal1=0,5
-		#self.start2_ori,self.goal2=3,4
+		#for task
+		self.is_task_flag = False
 
 	def random_start(self):
 		self.G_nodes_copy = copy.deepcopy(list(self.G.nodes()))
@@ -232,7 +229,11 @@ class MapMake():
 		#if s==self.pos[goal_i] and goal_i==0:
 		if [obs_i[0],obs_i[1]]==self.pos[goal_i]:
 			#return ['null']
-			return [goal_i]
+			if not self.is_task_flag:
+				return [goal_i]
+			#継続型において，ゴールしていても動けるように変更
+			else:
+				pass
 
 		action_set = []
 		#print(s,pos.values())
@@ -277,6 +278,10 @@ class MapMake():
 		
 		return collision_flag
 
+	#for task
+	def task_flag_on(self):
+		self.is_task_flag = True
+	
 	# create one task
 	def create_task(self, timelimit):
 		G_nodes_copy = copy.deepcopy(list(self.G.nodes()))

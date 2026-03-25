@@ -40,16 +40,14 @@ class MARLPolicy():
     
     def get_model_path(self, env):
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        #filename = f"{env.map_name}_{env.agent_num}_{self.path_planner}.th"
         filename = f"{env.map_name}_{self.path_planner}.th"
-        #filename = f"{env.map_name}_{env.agent_num}_{self.path_planner}_{self.args.tmp_num}.th"
+        filename = f"{env.map_name}_{env.agent_num}_{self.path_planner}.th"
         path = os.path.join(base_dir, "models", "safe", filename)
 
         return path
-
     
     def policy(self, obs, env):
-        #vdnとiqlは以下が必要（agent_idをつけてしまったため）
+        #agent_idをtrueにしている場合，以下が必要
         #identity = np.eye(env.agent_num)
         #obs = np.concatenate([obs, identity], axis=1)
 

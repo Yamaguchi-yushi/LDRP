@@ -23,7 +23,8 @@ class DrpEnv(gym.Env):
 			collision,
 			map_name="map_3x3",
 			reward_list={"goal": 100, "collision": -10, "wait": -10, "move": -1},
-			task_flag=False
+			task_flag=False,
+			task_list = None,
 		  ):
 		self.agent_num = agent_num
 		self.n_agents = agent_num # for epymarl
@@ -83,6 +84,11 @@ class DrpEnv(gym.Env):
 		self.assigned_tasks=[]#エージェントが割り当てられたタスク(未ピックを含む)
 		self.assigned_list=[]#未実行のタスクとエージェントの割り当て表
 		self.task_num = self.agent_num*2 # for tasklist, each agent can have 2 tasks at most
+		self.alltasks = task_list
+
+		if self.is_tasklist:
+			self.ee_env.task_flag_on()
+
 		#for rendering
 		#if self.is_tasklist:
 		#	self.taskgui=GUI_tasklist()
@@ -124,7 +130,8 @@ class DrpEnv(gym.Env):
 			self.assigned_list=[]
 			#self.assigned_tasks[i] is a task assigned to agent i
 			self.assigned_tasks=[[] for _ in range(self.agent_num)] 
-			self.alltasks = self.ee_env.create_tasklist(self.time_limit, self.agent_num, 1)
+			if self.alltasks is None:
+				self.alltasks = self.ee_env.create_tasklist(self.time_limit, self.agent_num, 1)
 
 		#initialize obs
 		self.obs = tuple(np.array([self.pos[self.start_ori_array[i]][0], self.pos[self.start_ori_array[i]][1], self.start_ori_array[i], self.goal_array[i]]) for i in range(self.agent_num))
@@ -190,6 +197,7 @@ class DrpEnv(gym.Env):
 				self.obs_prepare.append(self.obs_current_chache[i])
 				self.wait_count[i] += 1
 				#pbsのため，その場待機でもcurrent_goalをNoneのままでないように変更
+				#従来のdrpは以下の行はなし
 				self.current_goal_prepare[i] = action_i
 			# if available ⇢ obs_prepare update by obs_i_
 			else:
@@ -264,6 +272,12 @@ class DrpEnv(gym.Env):
 			info["collision"] = True
 			#obs = self.obs_manager.calc_obs()
 			ri_array = [collision_reward for _ in range(self.agent_num)]
+
+			self.obs = tuple([np.array(i) for i in self.obs_prepare])
+			self.obs_onehot = copy.deepcopy(self.obs_onehot_prepare)
+			self.current_start = copy.deepcopy(self.current_start_prepare) 
+			self.current_goal = copy.deepcopy(self.current_goal_prepare)
+
 			
 			# return obs, [collision_reward for _ in range(self.agent_num)], self.terminated, info 
 			

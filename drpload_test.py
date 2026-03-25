@@ -4,7 +4,7 @@ import yaml
 import time
 import sys
 from argparse import Namespace
-from src.policy.pbs import PBS
+from src.all_policy.pbs import PBS
 from src.all_policy import all_policy 
 #import sys
 #import os

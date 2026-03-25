@@ -7,8 +7,7 @@ map_name: "map_3x3"
 task_assigner: "tp"
 path_planner: "pbs"
 
-time_limit: 100
-#time_limit: 30
+time_limit: 1000
 
 test_num: 1
 

@@ -8,8 +8,8 @@ from copy import deepcopy
 import time
 import sys
 
-from src.policy.policy import policy
-from src.policy.policy_manager import PolicyManager 
+from src.policy import Policy
+from src.all_policy.policy_manager import PolicyManager 
 from src.task_assign.task_manager import TaskManager
 
 class Runner():
@@ -41,6 +41,7 @@ class Runner():
         self.info_buffer = deque(maxlen=self.test_num)
         self.path_planner = PolicyManager(self.args)
         self.task_manager = TaskManager(self.args.task_assigner, self.args)
+        self.both_policy_manager = Policy(self.args)
 
     def get_avail_actions(self):
         avail_actions = []
@@ -64,11 +65,12 @@ class Runner():
         
         
         while not done:
+            """
             agents_action = self.path_planner.policy(obs_n, self.env)
-            #agents_action = policy(obs_n, self.env)
-
             task_assign = self.task_manager.assign_task(self.env)
             joint_action = {"pass": agents_action, "task": task_assign}
+            """
+            joint_action = self.both_policy_manager.policy(obs_n, self.env)
 
             next_obs_n, rew_n, terminated_n, info = self.env.step(joint_action)
             
@@ -92,21 +94,20 @@ class Runner():
                 self.tmp_flag = True
 
             #"""
-            if done and info["collision"]:
-                sys.exit()
-
-            if 1==1:
+            if 1==0:
                 #print("############################")
                 print("step:", env_step)
+                print("agents_action:", agents_action)
                 print("current_start:", self.env.current_start)
                 print("current_goal:", self.env.current_goal)
                 print("goal_array:", self.env.goal_array)
+                print("obs", self.env.obs)
                 #print("current_tasklist:", self.env.current_tasklist)
                 #print("assigned_tasks:", self.env.assigned_tasks)
                 #print("assigned_list:", self.env.assigned_list)
-                print("agents_action:", agents_action)
                 #print("task_assign:", task_assign)
                 print("############################")
+
             #"""
 
         return episode_score, env_step, info
@@ -114,7 +115,7 @@ class Runner():
     def run(self):
 
         step_tmp = 0
-
+        #強化学習用
         if self.training:
             self.task_Agent.task_assigner.set_test_mode(False)
             while self.current_step < self.max_step:
@@ -141,6 +142,7 @@ class Runner():
             self.test_mode = True
 
 
+        #実行ループ
         times = []
         tmp_list = []
         self.info_buffer = deque(maxlen=self.test_num)
@@ -168,12 +170,12 @@ class Runner():
         #print("衝突なし:",np.mean(full_completion),len(full_completion))
         #print(non_lock_completion)
         #print("ロックなし", np.mean(non_lock_completion), len(non_lock_completion))
-        print("Total test episodes:", len(self.info_buffer))
-        print("Average steps:", np.mean(steps))
+        #print("Total test episodes:", len(self.info_buffer))
+        #print("Average steps:", np.mean(steps))
         print("Average task completion:", np.mean(task_completion))
-        print("最高値:",np.max(task_completion))
-        print("最低値:",np.min(task_completion))
-        print("実行時間:", np.sum(times), "秒")
+        #print("最高値:",np.max(task_completion))
+        #print("最低値:",np.min(task_completion))
+        #print("実行時間:", np.sum(times), "秒")
         print("平均実行時間:", np.mean(times), "秒")
 
         return

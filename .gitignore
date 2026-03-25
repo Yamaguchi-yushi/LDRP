@@ -5,3 +5,4 @@ src/epymarl/results/
 logs/
 results/
 train_results/
+**/models/
