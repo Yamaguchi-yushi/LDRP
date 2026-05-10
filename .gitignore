@@ -6,6 +6,7 @@ logs/
 results/
 train_results/
 **/models/
-.claude/
+.claude/settings.local.json
+.claude/*.local.*
 src/lare/path/saved_models/
 src/lare/task/saved_models/
