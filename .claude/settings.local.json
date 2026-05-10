@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:ojs.aaai.org)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/Yamaguchi-yushi/Safe-TSL-DBCT/main/drp_env/drp_env.py\")",
+      "Bash(curl -s \"https://api.github.com/repos/thu-rllab/LaRe/git/trees/main?recursive=1\")",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s \"https://raw.githubusercontent.com/thu-rllab/LaRe/main/mpe/models/reward_model/vae/vae.py\")",
+      "Bash(curl -s \"https://api.github.com/repos/thu-rllab/LaRe/git/trees/main\")",
+      "Bash(python3 -c \"import sys, json; data=json.load\\(sys.stdin\\); [print\\(f\\\\\"{item['type']:4} {item['path']}\\\\\"\\) for item in data.get\\('tree', []\\) if 'path' in item]\")",
+      "Bash(curl -s \"https://api.github.com/repos/thu-rllab/LaRe/contents/mpe/models\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/thu-rllab/LaRe/master/mpe/models/reward_model/vae/vae.py\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/thu-rllab/LaRe/master/mpe/models/reward_model/arel/modules.py\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/thu-rllab/LaRe/master/mpe/runners/MPE_runner.py\")",
+      "Bash(curl -s \"https://api.github.com/repos/Yamaguchi-yushi/Safe-TSL-DBCT/contents/drp_env/reward_model/LLMrd\")",
+      "Bash(curl -s \"https://api.github.com/repos/Yamaguchi-yushi/Safe-TSL-DBCT/contents/drp_env/reward_model/mard\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/thu-rllab/LaRe/master/mpe/models/reward_model/arel/transformers.py\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/Yamaguchi-yushi/Safe-TSL-DBCT/main/drp_env/reward_model/LLMrd/factor_reward_decompose.py\")",
+      "Bash(curl -s \"https://raw.githubusercontent.com/Yamaguchi-yushi/Safe-TSL-DBCT/main/drp_env/reward_model/mard/mard.py\")",
+      "Bash(find / -type d -name \"Safe-TSL-DBCT\")",
+      "Bash(find / -type d -name \"*DBCT*\")",
+      "Bash(ls /Users/yamaguchiyuushi/MARL4DRP/for_epymarl /Users/yamaguchiyuushi/MARL4DRP/epymarl 2>&1 | head -50)",
+      "Read(//Users/yamaguchiyuushi/MARL4DRP/for_epymarl/**)",
+      "Read(//Users/yamaguchiyuushi/MARL4DRP/drp_env/reward_model/**)",
+      "Read(//Users/yamaguchiyuushi/MARL4DRP/drp_env/**)",
+      "Bash(find /Users/yamaguchiyuushi/MARL4DRP -name \"*.py\" | xargs grep -l \"factor_reward\\\\|FactorReward\\\\|use_lare\\\\|use_RD\\\\|use_lar\" 2>/dev/null | head -20)",
+      "Read(//Users/yamaguchiyuushi/MARL4DRP/**)",
+      "Bash(mkdir -p /Users/yamaguchiyuushi/LDRP/src/lare/path /Users/yamaguchiyuushi/LDRP/src/lare/shared)",
+      "Bash(/opt/anaconda3/envs/ldrp/bin/python -c ' *)"
+    ],
+    "additionalDirectories": [
+      "/Users/yamaguchiyuushi/LDRP/src/lare"
+    ]
+  }
+}

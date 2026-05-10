@@ -1,13 +1,13 @@
 import subprocess
 import time
 import os
-import time
+import sys
 
 map_name = [
-    "map_5x4",
+    #"map_5x4",
     "map_8x5",
-    "map_aoba00",
-    "map_aoba01",
+    #"map_aoba00",
+    #"map_aoba01",
 ]
 
 agent_num = [
@@ -17,7 +17,7 @@ agent_num = [
 ]
 
 path_planner = [
-    "iql",
+    #"iql",
     "qmix",
     #"vdn",
     #"pbs",
@@ -29,7 +29,7 @@ task_assigner = [
 ]
 #"""
 command = [
-    ["python3", "test.py", str(i), str(j), str(k), str(l)]
+    [sys.executable, "test.py", str(i), str(j), str(k), str(l)]
     for i in map_name
     for j in agent_num
     for k in path_planner

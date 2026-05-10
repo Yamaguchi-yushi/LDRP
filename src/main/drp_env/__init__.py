@@ -62,6 +62,8 @@ for an, map_name in product(agent_num, map_list):
             "collision": collision,
             "map_name": map_name,
             "reward_list": reward_list,
+            # LaRe-Path defaults: disabled. Override via gym.make(..., use_lare_path=True).
+            "use_lare_path": False,
         },
     )
 

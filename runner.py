@@ -73,12 +73,21 @@ class Runner():
             joint_action = self.both_policy_manager.policy(obs_n, self.env)
 
             next_obs_n, rew_n, terminated_n, info = self.env.step(joint_action)
-            
+
             done = all(terminated_n)
 
             #報酬をバッファへ
             if self.training:
-                self.task_manager.task_assigner.buffer_add_rewards(sum(rew_n), done)
+                # LaRe-Task: when the task decoder is trained, replace the env-reward sum
+                # with the proxy reward for this step's assignment decisions.
+                if (
+                    isinstance(info, dict)
+                    and info.get("lare_task_is_trained", False)
+                ):
+                    task_reward = float(info.get("lare_task_proxy_reward", 0.0))
+                else:
+                    task_reward = float(sum(rew_n))
+                self.task_manager.task_assigner.buffer_add_rewards(task_reward, done)
 
             episode_score += np.mean(rew_n)
                             

@@ -1,11 +1,11 @@
 env_name: "drp_env:drp_safe-4agent_map_8x5-v2"
 #env_name: "drp_env:drp-5agent_map_8x5-v2"
 
-agent_num: 3
-map_name: "map_3x3"
+agent_num: 4
+map_name: "map_8x5"
 
 task_assigner: "tp"
-path_planner: "pbs"
+path_planner: "qmix"
 
 time_limit: 1000
 
@@ -23,3 +23,75 @@ gae_lambda: 0.95
 clip_epsilon: 0.2
 entropy_coef: 0.0001
 value_loss_coef: 0.5
+
+# --- LaRe-Path (System A) ---
+# Toggle: when false, behavior is identical to the original LDRP (no LaRe code path runs).
+# When true, the env initializes a LaRePathModule and either:
+#   - trains a reward decoder online (scratch mode), or
+#   - loads a pretrained decoder (pretrained mode, no further training), or
+#   - loads a checkpoint and continues training (finetuning mode).
+use_lare_path: false
+use_lare_path_training: true        # if false, factors/decoder are trained but rewards are NOT replaced
+lare_path_factor_dim: 10            # 10-element evaluation_func, matching Safe-TSL-DBCT
+lare_path_decoder_hidden_dim: 64
+lare_path_decoder_n_layers: 3
+lare_path_use_transformer: false    # AREL Time-Agent Transformer (optional credit assignment)
+lare_path_transformer_heads: 4
+lare_path_transformer_depth: 2
+lare_path_buffer_capacity: 512
+lare_path_min_buffer: 64
+lare_path_update_freq: 32
+lare_path_batch_size: 32
+lare_path_lr: 0.0005
+
+# Mode 3: pretrained (load + freeze, inference only).
+# Set use_pretrained_lare_path: true and provide a path/filename.
+# Resolution order: absolute path -> relative to repo root -> src/lare/path/saved_models/.
+use_pretrained_lare_path: false
+pretrained_lare_path_model_path: null
+
+# Mode 4: finetuning (load + continue training).
+# Pretrained takes precedence if both flags are set.
+use_finetuning_lare_path: false
+finetuning_lare_path_model_path: null
+
+# Autosave during training (scratch or finetuning).
+# Naming convention (PATH token + dedicated folder distinguish from Task models):
+#   scratch:    "{Safe}_{ALGO}_PATH_{map}_{N}agents_{X.X}M_checkpoint.pth"
+#   finetuning: "FT_{Safe}_{source_base}_{map}_{N}agents_{X.X}M_checkpoint.pth"
+# - Safe   = "Safe" when running on drp_safe-... env, else empty (no leading underscore)
+# - ALGO   = uppercased algorithm name detected from --config CLI arg (e.g. QMIX, IQL)
+# - {X.X}M = cumulative step count in millions
+# Files land under `lare_path_save_dir` (default: src/lare/path/saved_models/).
+# Set lare_path_autosave_path to override with an explicit fixed path.
+lare_path_autosave: false
+lare_path_autosave_path: null
+lare_path_save_dir: null    # null = src/lare/path/saved_models/ relative to repo root
+
+# --- LaRe-Task (System B) ---
+# Replaces sum(rew_n) in PPO task assigner with a proxy reward derived from a
+# 10-factor encoder over each assignment decision (defined in src/lare/task/encoder.py).
+# Same 4 modes as LaRe-Path (off / scratch / pretrained / finetuning).
+use_lare_task: false
+use_lare_task_training: true
+lare_task_factor_dim: 10
+lare_task_decoder_hidden_dim: 64
+lare_task_decoder_n_layers: 2
+lare_task_buffer_capacity: 512
+lare_task_min_buffer: 32
+lare_task_update_freq: 16
+lare_task_batch_size: 32
+lare_task_lr: 0.0005
+
+use_pretrained_lare_task: false
+pretrained_lare_task_model_path: null
+
+use_finetuning_lare_task: false
+finetuning_lare_task_model_path: null
+
+# Autosave naming for task models (TASK token + dedicated folder):
+#   scratch:    "{Safe}_{ALGO}_TASK_{map}_{N}agents_{X.X}M_checkpoint.pth"
+#   finetuning: "FT_{Safe}_{source_base}_{map}_{N}agents_{X.X}M_checkpoint.pth"
+lare_task_autosave: false
+lare_task_autosave_path: null
+lare_task_save_dir: null    # null = src/lare/task/saved_models/

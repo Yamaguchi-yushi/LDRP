@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore")
+
 import yaml
 import gym
 import sys
@@ -26,8 +29,51 @@ if __name__ == "__main__":
         config.path_planner = sys.argv[3]
         config.task_assigner = sys.argv[4]
 
-    env_name = "drp_env:drp-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
+    env_name = "drp_env:drp_safe-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
     #env_name = "drp_env:drp_safe-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
+
+    # Optionally forward LaRe-Path params from config (no-op when use_lare_path=false).
+    lare_path_keys = [
+        "use_lare_path",
+        "use_lare_path_training",
+        "lare_path_factor_dim",
+        "lare_path_decoder_hidden_dim",
+        "lare_path_decoder_n_layers",
+        "lare_path_use_transformer",
+        "lare_path_transformer_heads",
+        "lare_path_transformer_depth",
+        "lare_path_buffer_capacity",
+        "lare_path_min_buffer",
+        "lare_path_update_freq",
+        "lare_path_batch_size",
+        "lare_path_lr",
+        "use_pretrained_lare_path",
+        "pretrained_lare_path_model_path",
+        "use_finetuning_lare_path",
+        "finetuning_lare_path_model_path",
+        "lare_path_autosave",
+        "lare_path_autosave_path",
+        "lare_path_save_dir",
+        # LaRe-Task (System B)
+        "use_lare_task",
+        "use_lare_task_training",
+        "lare_task_factor_dim",
+        "lare_task_decoder_hidden_dim",
+        "lare_task_decoder_n_layers",
+        "lare_task_buffer_capacity",
+        "lare_task_min_buffer",
+        "lare_task_update_freq",
+        "lare_task_batch_size",
+        "lare_task_lr",
+        "use_pretrained_lare_task",
+        "pretrained_lare_task_model_path",
+        "use_finetuning_lare_task",
+        "finetuning_lare_task_model_path",
+        "lare_task_autosave",
+        "lare_task_autosave_path",
+        "lare_task_save_dir",
+    ]
+    lare_kwargs = {k: getattr(config, k) for k in lare_path_keys if hasattr(config, k)}
 
     env = gym.make(
         env_name,
@@ -36,6 +82,7 @@ if __name__ == "__main__":
         time_limit=config.time_limit,
         task_flag=True,
         task_list=None,
+        **lare_kwargs,
     )
     """
     with open("./config/algo/" + config.algo + ".yaml", 'r') as file:

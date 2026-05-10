@@ -25,6 +25,44 @@ class DrpEnv(gym.Env):
 			reward_list={"goal": 100, "collision": -10, "wait": -10, "move": -1},
 			task_flag=False,
 			task_list = None,
+			use_lare_path=False,
+			use_lare_path_training=True,
+			lare_path_factor_dim=10,
+			lare_path_decoder_hidden_dim=64,
+			lare_path_decoder_n_layers=3,
+			lare_path_use_transformer=False,
+			lare_path_transformer_heads=4,
+			lare_path_transformer_depth=2,
+			lare_path_buffer_capacity=512,
+			lare_path_min_buffer=64,
+			lare_path_update_freq=32,
+			lare_path_batch_size=32,
+			lare_path_lr=5e-4,
+			use_pretrained_lare_path=False,
+			pretrained_lare_path_model_path=None,
+			use_finetuning_lare_path=False,
+			finetuning_lare_path_model_path=None,
+			lare_path_autosave=False,
+			lare_path_autosave_path=None,
+			lare_path_save_dir=None,
+			# --- LaRe-Task (System B) ---
+			use_lare_task=False,
+			use_lare_task_training=True,
+			lare_task_factor_dim=10,
+			lare_task_decoder_hidden_dim=64,
+			lare_task_decoder_n_layers=2,
+			lare_task_buffer_capacity=512,
+			lare_task_min_buffer=32,
+			lare_task_update_freq=16,
+			lare_task_batch_size=32,
+			lare_task_lr=5e-4,
+			use_pretrained_lare_task=False,
+			pretrained_lare_task_model_path=None,
+			use_finetuning_lare_task=False,
+			finetuning_lare_task_model_path=None,
+			lare_task_autosave=False,
+			lare_task_autosave_path=None,
+			lare_task_save_dir=None,
 		  ):
 		self.agent_num = agent_num
 		self.n_agents = agent_num # for epymarl
@@ -72,7 +110,7 @@ class DrpEnv(gym.Env):
 		self.n_nodes = len(self.G.nodes)
 		self.n_actions = self.n_nodes
 		self.action_space = gym.spaces.Tuple(tuple([gym.spaces.Discrete(self.n_nodes)] * self.agent_num))
-		
+
 		obs_box = self.obs_manager.get_obs_box()
 		self.observation_space = gym.spaces.Tuple(tuple([obs_box] * self.agent_num))
 
@@ -89,9 +127,407 @@ class DrpEnv(gym.Env):
 		if self.is_tasklist:
 			self.ee_env.task_flag_on()
 
+		# --- LaRe-Path (System A) ---
+		# Mirrors Safe-TSL-DBCT's 4 modes:
+		#   (1) use_lare_path=False                                                  -> baseline (no LaRe)
+		#   (2) use_lare_path=True (pretrained=False, finetuning=False)              -> train online from scratch
+		#   (3) use_lare_path=True, use_pretrained_lare_path=True                    -> load + freeze (inference only)
+		#   (4) use_lare_path=True, use_finetuning_lare_path=True                    -> load + continue training
+		# Pretrained takes precedence over finetuning if both are set.
+		self.use_lare_path = bool(use_lare_path)
+		self.use_lare_path_training = bool(use_lare_path_training)
+		self.use_pretrained_lare_path = bool(use_pretrained_lare_path)
+		self.pretrained_lare_path_model_path = pretrained_lare_path_model_path
+		self.use_finetuning_lare_path = bool(use_finetuning_lare_path)
+		self.finetuning_lare_path_model_path = finetuning_lare_path_model_path
+		self.lare_path_autosave = bool(lare_path_autosave)
+		self.lare_path_autosave_path = lare_path_autosave_path
+		self.lare_path_save_dir = lare_path_save_dir
+		self.lare_path_module = None
+		self._lare_prev_onehot_pos = None
+		self._lare_current_colliding_pairs = None
+		# Cumulative step counter (NOT reset between episodes) — used to derive
+		# the "{N.N}M" steps token in saved-model filenames, mirroring Safe-TSL-DBCT.
+		self._lare_total_step_account = 0
+
+		# --- LaRe-Task (System B) ---
+		self.use_lare_task = bool(use_lare_task)
+		self.use_lare_task_training = bool(use_lare_task_training)
+		self.use_pretrained_lare_task = bool(use_pretrained_lare_task)
+		self.pretrained_lare_task_model_path = pretrained_lare_task_model_path
+		self.use_finetuning_lare_task = bool(use_finetuning_lare_task)
+		self.finetuning_lare_task_model_path = finetuning_lare_task_model_path
+		self.lare_task_autosave = bool(lare_task_autosave)
+		self.lare_task_autosave_path = lare_task_autosave_path
+		self.lare_task_save_dir = lare_task_save_dir
+		self.lare_task_module = None
+		# Parallel to current_tasklist: per-task creation step (set when task added).
+		self._lare_task_creation_steps = []
+
+		if self.use_lare_path:
+			self._init_lare_path(
+				factor_dim=lare_path_factor_dim,
+				decoder_hidden_dim=lare_path_decoder_hidden_dim,
+				decoder_n_layers=lare_path_decoder_n_layers,
+				use_transformer=lare_path_use_transformer,
+				transformer_heads=lare_path_transformer_heads,
+				transformer_depth=lare_path_transformer_depth,
+				buffer_capacity=lare_path_buffer_capacity,
+				min_buffer=lare_path_min_buffer,
+				update_freq=lare_path_update_freq,
+				batch_size=lare_path_batch_size,
+				learning_rate=lare_path_lr,
+			)
+
+		if self.use_lare_task:
+			self._init_lare_task(
+				factor_dim=lare_task_factor_dim,
+				decoder_hidden_dim=lare_task_decoder_hidden_dim,
+				decoder_n_layers=lare_task_decoder_n_layers,
+				buffer_capacity=lare_task_buffer_capacity,
+				min_buffer=lare_task_min_buffer,
+				update_freq=lare_task_update_freq,
+				batch_size=lare_task_batch_size,
+				learning_rate=lare_task_lr,
+			)
+
 		#for rendering
 		#if self.is_tasklist:
 		#	self.taskgui=GUI_tasklist()
+
+	# ---------------- LaRe-Path naming helpers (Safe-TSL-DBCT convention) ----------------
+	def _lare_repo_root(self):
+		return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
+	def _lare_default_save_dir(self):
+		return self.lare_path_save_dir or os.path.join(self._lare_repo_root(), "src", "lare", "path", "saved_models")
+
+	def _lare_get_safe_prefix(self):
+		"""Return "Safe" if running under SafeEnv (drp_safe-...), else ""."""
+		return "Safe" if self.__class__.__name__ == "SafeEnv" else ""
+
+	def _lare_get_algorithm_name(self):
+		"""Detect algorithm name from CLI (--config=qmix etc.) — uppercased.
+
+		Falls back to the configured path_planner-like hint, then "UNKNOWN".
+		"""
+		try:
+			argv = list(sys.argv)
+			for i, a in enumerate(argv):
+				if a == "--config" and i + 1 < len(argv):
+					return str(argv[i + 1]).upper()
+				if a.startswith("--config="):
+					return a.split("=", 1)[1].upper()
+		except Exception:
+			pass
+		return "UNKNOWN"
+
+	def _lare_get_steps_str(self):
+		"""Format cumulative step count as "X.YM" (Safe-TSL-DBCT style)."""
+		steps_in_millions = self._lare_total_step_account / 1_000_000
+		return f"{steps_in_millions:.1f}M"
+
+	def _lare_get_source_base_name(self):
+		"""For finetuning: strip directories, ".pth", "_final"/"_checkpoint", and leading "FT_"."""
+		path = self.finetuning_lare_path_model_path
+		if not path:
+			return "unknown_source"
+		try:
+			name = os.path.basename(str(path))
+			if name.endswith(".pth"):
+				name = name[:-4]
+			name = name.replace("_final", "").replace("_checkpoint", "")
+			while name.startswith("FT_"):
+				name = name[3:]
+			return name or "unknown_source"
+		except Exception:
+			return "unknown_source"
+
+	def _lare_build_save_filename(self, suffix):
+		"""Assemble filename for LaRe-Path checkpoints.
+
+		Scratch:    "{Safe_}{ALGO}_PATH_{map}_{N}agents_{S}M_{suffix}.pth"
+		Finetuning: "FT_{Safe_}{source_base}_{map}_{N}agents_{S}M_{suffix}.pth"
+		The "Safe_" prefix is omitted entirely for non-Safe envs (no leading "_").
+		The PATH token disambiguates path-system models from LaRe-Task ones; folders
+		(src/lare/path/saved_models/ vs src/lare/task/saved_models/) provide the
+		primary separation.
+		"""
+		safe = self._lare_get_safe_prefix()
+		safe_seg = f"{safe}_" if safe else ""
+		algo = self._lare_get_algorithm_name()
+		map_name = getattr(self, "map_name", "unknown_map")
+		agents = getattr(self, "agent_num", "?")
+		steps = self._lare_get_steps_str()
+		if self.use_finetuning_lare_path and self.finetuning_lare_path_model_path:
+			source = self._lare_get_source_base_name()
+			return f"FT_{safe_seg}{source}_{map_name}_{agents}agents_{steps}_{suffix}.pth"
+		return f"{safe_seg}{algo}_PATH_{map_name}_{agents}agents_{steps}_{suffix}.pth"
+
+	def _lare_resolve_autosave_path(self):
+		"""Decide the autosave path for the current run.
+
+		Priority:
+		  1. explicit `lare_path_autosave_path` (used as-is)
+		  2. `lare_path_autosave=True` -> auto-generated filename under `lare_path_save_dir`
+		  3. None (autosave disabled)
+		"""
+		if self.lare_path_autosave_path:
+			return self.lare_path_autosave_path
+		if self.lare_path_autosave:
+			fname = self._lare_build_save_filename("checkpoint")
+			return os.path.join(self._lare_default_save_dir(), fname)
+		return None
+
+	# ---------------- LaRe-Task naming helpers (Safe-TSL-DBCT convention, _LARETASK suffix) ----------------
+	def _lare_task_default_save_dir(self):
+		return self.lare_task_save_dir or os.path.join(self._lare_repo_root(), "src", "lare", "task", "saved_models")
+
+	def _lare_task_get_source_base_name(self):
+		path = self.finetuning_lare_task_model_path
+		if not path:
+			return "unknown_source"
+		try:
+			name = os.path.basename(str(path))
+			if name.endswith(".pth"):
+				name = name[:-4]
+			name = name.replace("_final", "").replace("_checkpoint", "")
+			while name.startswith("FT_"):
+				name = name[3:]
+			return name or "unknown_source"
+		except Exception:
+			return "unknown_source"
+
+	def _lare_task_build_save_filename(self, suffix):
+		"""Filename for LaRe-Task models. TASK token + folder separation distinguishes from path models.
+
+		Scratch:    "{Safe_}{ALGO}_TASK_{map}_{N}agents_{S}M_{suffix}.pth"
+		Finetuning: "FT_{Safe_}{source_base}_{map}_{N}agents_{S}M_{suffix}.pth"
+		"""
+		safe = self._lare_get_safe_prefix()
+		safe_seg = f"{safe}_" if safe else ""
+		algo = self._lare_get_algorithm_name()
+		map_name = getattr(self, "map_name", "unknown_map")
+		agents = getattr(self, "agent_num", "?")
+		steps = self._lare_get_steps_str()
+		if self.use_finetuning_lare_task and self.finetuning_lare_task_model_path:
+			source = self._lare_task_get_source_base_name()
+			return f"FT_{safe_seg}{source}_{map_name}_{agents}agents_{steps}_{suffix}.pth"
+		return f"{safe_seg}{algo}_TASK_{map_name}_{agents}agents_{steps}_{suffix}.pth"
+
+	def _lare_task_resolve_autosave_path(self):
+		if self.lare_task_autosave_path:
+			return self.lare_task_autosave_path
+		if self.lare_task_autosave:
+			fname = self._lare_task_build_save_filename("checkpoint")
+			return os.path.join(self._lare_task_default_save_dir(), fname)
+		return None
+
+	def _init_lare_path(self, factor_dim, decoder_hidden_dim, decoder_n_layers,
+						use_transformer, transformer_heads, transformer_depth,
+						buffer_capacity, min_buffer, update_freq, batch_size, learning_rate):
+		"""Initialize LaRe-Path module. Falls back silently to disabled mode on import failure."""
+		try:
+			# Resolve the LDRP repo root and add it to sys.path so `src.lare.*` imports work.
+			repo_root = self._lare_repo_root()
+			if repo_root not in sys.path:
+				sys.path.append(repo_root)
+			from src.lare.path.lare_path_module import LaRePathConfig, LaRePathModule
+
+			# Decide effective training/frozen flags based on the mode.
+			pretrained = self.use_pretrained_lare_path and self.pretrained_lare_path_model_path
+			finetuning = (
+				self.use_finetuning_lare_path
+				and self.finetuning_lare_path_model_path
+				and not pretrained
+			)
+			# Pretrained -> frozen; finetuning -> trainable (continues from loaded weights);
+			# scratch -> trainable.
+			cfg_frozen = bool(pretrained)
+			# autosave only when training (scratch or finetune). When the user gives an
+			# explicit path, freeze it; otherwise use a callable so the {N.N}M token
+			# in the filename reflects the cumulative step count at each save time.
+			if cfg_frozen:
+				autosave = None
+			elif self.lare_path_autosave_path:
+				autosave = self.lare_path_autosave_path
+			elif self.lare_path_autosave:
+				autosave = self._lare_resolve_autosave_path
+			else:
+				autosave = None
+
+			cfg = LaRePathConfig(
+				factor_dim=factor_dim,
+				decoder_hidden_dim=decoder_hidden_dim,
+				decoder_n_layers=decoder_n_layers,
+				use_transformer=use_transformer,
+				transformer_heads=transformer_heads,
+				transformer_depth=transformer_depth,
+				transformer_seq_length=self.time_limit,
+				buffer_capacity=buffer_capacity,
+				seq_length=self.time_limit,
+				min_buffer=min_buffer,
+				update_freq=update_freq,
+				batch_size=batch_size,
+				learning_rate=learning_rate,
+				use_lare_training=self.use_lare_path_training,
+				frozen=cfg_frozen,
+				autosave_path=autosave,
+			)
+			self.lare_path_module = LaRePathModule(self, cfg)
+
+			# Resolve and load weights for pretrained / finetuning modes.
+			if pretrained:
+				self._load_lare_path_weights(self.pretrained_lare_path_model_path, freeze=True, label="PRETRAINED")
+			elif finetuning:
+				self._load_lare_path_weights(self.finetuning_lare_path_model_path, freeze=False, label="FINETUNE")
+			else:
+				print(
+					f"[LaRe-Path] Initialized (mode=scratch, training={self.use_lare_path_training}, "
+					f"factors={factor_dim})"
+				)
+		except Exception as e:
+			print(f"[LaRe-Path] Failed to initialize, falling back to env reward: {e}")
+			self.use_lare_path = False
+			self.lare_path_module = None
+
+	def _load_lare_path_weights(self, model_path, freeze, label):
+		"""Try common locations for `model_path`, then call module.load_model(..., freeze=freeze)."""
+		repo_root = self._lare_repo_root()
+		save_dir = self._lare_default_save_dir()
+		candidates = []
+		if os.path.isabs(model_path):
+			candidates.append(model_path)
+		else:
+			candidates.append(model_path)
+			candidates.append(os.path.join(repo_root, model_path))
+			candidates.append(os.path.join(save_dir, model_path))
+		# Allow filenames without extension.
+		extra = []
+		for p in candidates:
+			if not p.endswith(".pth"):
+				extra.append(p + ".pth")
+		candidates += extra
+
+		resolved = next((p for p in candidates if os.path.exists(p)), None)
+		if resolved is None:
+			print(f"[LaRe-Path][{label}] Model not found in: {candidates}")
+			print(f"[LaRe-Path][{label}] Falling back to scratch training.")
+			return
+
+		try:
+			self.lare_path_module.load_model(resolved, freeze=freeze)
+			mode = "frozen (inference only)" if freeze else "trainable (finetuning)"
+			print(f"[LaRe-Path][{label}] Loaded {resolved} - {mode}")
+		except Exception as e:
+			print(f"[LaRe-Path][{label}] Load failed ({e}); falling back to scratch.")
+
+	# ---------------- LaRe-Task initialisation / weight-loading ----------------
+	def _init_lare_task(self, factor_dim, decoder_hidden_dim, decoder_n_layers,
+						buffer_capacity, min_buffer, update_freq, batch_size, learning_rate):
+		try:
+			repo_root = self._lare_repo_root()
+			if repo_root not in sys.path:
+				sys.path.append(repo_root)
+			from src.lare.task.lare_task_module import LaReTaskConfig, LaReTaskModule
+
+			pretrained = self.use_pretrained_lare_task and self.pretrained_lare_task_model_path
+			finetuning = (
+				self.use_finetuning_lare_task
+				and self.finetuning_lare_task_model_path
+				and not pretrained
+			)
+			cfg_frozen = bool(pretrained)
+			if cfg_frozen:
+				autosave = None
+			elif self.lare_task_autosave_path:
+				autosave = self.lare_task_autosave_path
+			elif self.lare_task_autosave:
+				autosave = self._lare_task_resolve_autosave_path
+			else:
+				autosave = None
+
+			cfg = LaReTaskConfig(
+				factor_dim=factor_dim,
+				decoder_hidden_dim=decoder_hidden_dim,
+				decoder_n_layers=decoder_n_layers,
+				buffer_capacity=buffer_capacity,
+				min_buffer=min_buffer,
+				update_freq=update_freq,
+				batch_size=batch_size,
+				learning_rate=learning_rate,
+				use_lare_training=self.use_lare_task_training,
+				frozen=cfg_frozen,
+				autosave_path=autosave,
+			)
+
+			# Reuse LaRe-Path's graph_diameter when available (saves a Dijkstra all-pairs).
+			gd = None
+			if self.lare_path_module is not None:
+				gd = float(getattr(self.lare_path_module, "graph_diameter", None) or 0.0) or None
+			self.lare_task_module = LaReTaskModule(self, cfg, graph_diameter=gd)
+
+			if pretrained:
+				self._load_lare_task_weights(self.pretrained_lare_task_model_path, freeze=True, label="PRETRAINED")
+			elif finetuning:
+				self._load_lare_task_weights(self.finetuning_lare_task_model_path, freeze=False, label="FINETUNE")
+			else:
+				print(
+					f"[LaRe-Task] Initialized (mode=scratch, training={self.use_lare_task_training}, "
+					f"factors={factor_dim})"
+				)
+		except Exception as e:
+			print(f"[LaRe-Task] Failed to initialize, falling back to env reward: {e}")
+			self.use_lare_task = False
+			self.lare_task_module = None
+
+	def _load_lare_task_weights(self, model_path, freeze, label):
+		repo_root = self._lare_repo_root()
+		save_dir = self._lare_task_default_save_dir()
+		candidates = []
+		if os.path.isabs(model_path):
+			candidates.append(model_path)
+		else:
+			candidates.append(model_path)
+			candidates.append(os.path.join(repo_root, model_path))
+			candidates.append(os.path.join(save_dir, model_path))
+		extra = []
+		for p in candidates:
+			if not p.endswith(".pth"):
+				extra.append(p + ".pth")
+		candidates += extra
+		resolved = next((p for p in candidates if os.path.exists(p)), None)
+		if resolved is None:
+			print(f"[LaRe-Task][{label}] Model not found in: {candidates}")
+			print(f"[LaRe-Task][{label}] Falling back to scratch training.")
+			return
+		try:
+			self.lare_task_module.load_model(resolved, freeze=freeze)
+			mode = "frozen (inference only)" if freeze else "trainable (finetuning)"
+			print(f"[LaRe-Task][{label}] Loaded {resolved} - {mode}")
+		except Exception as e:
+			print(f"[LaRe-Task][{label}] Load failed ({e}); falling back to scratch.")
+
+	def _lare_compute_colliding_pairs(self, obs_prepare):
+		"""Mirror MARL4DRP.get_collision_agents() — returns list of pairs [[i, j], ...]."""
+		pairs = []
+		for i in range(self.agent_num - 1):
+			for j in range(i + 1, self.agent_num):
+				pi = [obs_prepare[i][0], obs_prepare[i][1]]
+				pj = [obs_prepare[j][0], obs_prepare[j][1]]
+				import math
+				if math.dist(pi, pj) < 5:
+					pairs.append([i, j])
+		return pairs
+
+	def _lare_capture_prev_onehot_pos(self):
+		"""Snapshot the (n_agents, n_nodes) position-onehot before the action is processed."""
+		prev = np.zeros((self.agent_num, self.n_nodes), dtype=np.float32)
+		for i in range(self.agent_num):
+			oh = np.asarray(self.obs_onehot[i]).flatten()
+			if oh.size >= self.n_nodes:
+				prev[i] = oh[:self.n_nodes]
+		return prev
 
 	def get_obs(self):
 		return self.obs
@@ -129,7 +565,9 @@ class DrpEnv(gym.Env):
 			self.current_tasklist=[]
 			self.assigned_list=[]
 			#self.assigned_tasks[i] is a task assigned to agent i
-			self.assigned_tasks=[[] for _ in range(self.agent_num)] 
+			self.assigned_tasks=[[] for _ in range(self.agent_num)]
+			# LaRe-Task: per-task creation step (parallel to current_tasklist).
+			self._lare_task_creation_steps = []
 			if self.alltasks is None:
 				self.alltasks = self.ee_env.create_tasklist(self.time_limit, self.agent_num, 1)
 
@@ -170,6 +608,14 @@ class DrpEnv(gym.Env):
 		if isinstance(joint_action, dict):
 			task_assign = joint_action.get("task", None)
 			joint_action = joint_action.get("pass", joint_action)
+
+		# LaRe-Path: snapshot per-agent onehot positions BEFORE movement.
+		if self.use_lare_path and self.lare_path_module is not None:
+			self._lare_prev_onehot_pos = self._lare_capture_prev_onehot_pos()
+		# Advance the cumulative step counter (shared by Path & Task naming).
+		if (self.use_lare_path and self.lare_path_module is not None) or \
+		   (self.use_lare_task and self.lare_task_module is not None):
+			self._lare_total_step_account += 1
 
 		#transite env based on joint_action
 		self.step_account += 1
@@ -250,6 +696,9 @@ class DrpEnv(gym.Env):
 		# 2) !!!obs_prepare & obs_onehot_prepare!!! を持って、
 		# second judge whether to !!! obs & obs_onehot !!! according to collision happen
 		collision_flag = self.ee_env.collision_detect(self.obs_prepare)
+		# LaRe-Path: also compute the explicit list of colliding pairs for the encoder.
+		if self.use_lare_path and self.lare_path_module is not None:
+			self._lare_current_colliding_pairs = self._lare_compute_colliding_pairs(self.obs_prepare)
 		info = {
 			"goal": False,
 			"collision": False,
@@ -311,6 +760,8 @@ class DrpEnv(gym.Env):
 					new_task = self.alltasks[self.step_account-1][i]
 					self.current_tasklist.append(new_task)
 					self.assigned_list.append(-1) # -1 means unassigned
+					# LaRe-Task: track creation step parallel to current_tasklist.
+					self._lare_task_creation_steps.append(self.step_account)
 
 			# remove the task from the list if it has been completed
 			for i in range(self.agent_num):
@@ -320,13 +771,58 @@ class DrpEnv(gym.Env):
 						if self.goal_array[i] == self.assigned_tasks[i][1]:
 							self.assigned_tasks[i] = [] # remove the task from assigned_tasks
 							self.task_completion += 1
-						
-			# assign tasks to agents
+
+			# assign tasks to agents — capture pre-assignment state for LaRe-Task.
+			lare_task_decisions = []
 			for i in range(self.agent_num):
 				if (self.assigned_tasks[i] == [] or i in self.assigned_list) and task_assign[i] != -1:
-					self.assigned_tasks[i] = self.current_tasklist[task_assign[i]]
+					r = task_assign[i]
+					task_r = self.current_tasklist[r]
+					was_idle = (self.assigned_tasks[i] == [])
+					prev_goal = None if was_idle else self.goal_array[i]
+					creation_step = (
+						self._lare_task_creation_steps[r]
+						if 0 <= r < len(self._lare_task_creation_steps)
+						else self.step_account
+					)
+					wait_steps = max(0, self.step_account - creation_step)
+
+					self.assigned_tasks[i] = self.current_tasklist[r]
 					self.goal_array[i] = self.assigned_tasks[i][0] # update goal to pick node
 					self.assigned_list[task_assign[i]] = i # update assigned_list
+
+					lare_task_decisions.append({
+						"agent_id": int(i),
+						"pickup": int(task_r[0]),
+						"dropoff": int(task_r[1]),
+						"agent_prev_goal": prev_goal,
+						"agent_was_idle": bool(was_idle),
+						"wait_steps": int(wait_steps),
+					})
+
+			# LaRe-Task: feed the new assignments through the encoder/decoder.
+			if (
+				self.use_lare_task
+				and self.lare_task_module is not None
+				and len(lare_task_decisions) > 0
+			):
+				try:
+					loads_after = [
+						1 if len(self.assigned_tasks[k]) > 0 else 0
+						for k in range(self.agent_num)
+					]
+					unassigned_after = sum(1 for v in self.assigned_list if v == -1)
+					n_step = len(lare_task_decisions)
+					full_decisions = [
+						{**d,
+						 "agent_loads_after": loads_after,
+						 "unassigned_after": unassigned_after,
+						 "n_assignments_step": n_step}
+						for d in lare_task_decisions
+					]
+					self.lare_task_module.record_step_assignments(self, full_decisions)
+				except Exception as e:
+					print(f"[LaRe-Task] step hook error (no proxy this step): {e}")
 
 			# update agent's start and goal
 			for i in range(self.agent_num):
@@ -341,6 +837,8 @@ class DrpEnv(gym.Env):
 								idx = self.assigned_list.index(i)
 								self.current_tasklist.pop(idx)
 								self.assigned_list.pop(idx)
+								if 0 <= idx < len(self._lare_task_creation_steps):
+									self._lare_task_creation_steps.pop(idx)
 							except ValueError:
 								print("ValueError: agent ", i, " 's assigned task is not in the current_tasklist")
 						#when agent i reach the drop node
@@ -368,8 +866,43 @@ class DrpEnv(gym.Env):
 
 		info["distance_from_start"] = self.distance_from_start
 
+		# LaRe-Path: compute factors, record the step, and (if trained + enabled) swap rewards.
+		if self.use_lare_path and self.lare_path_module is not None:
+			try:
+				factors = self.lare_path_module.compute_factors(
+					self._lare_prev_onehot_pos,
+					self._lare_current_colliding_pairs,
+				)
+				env_reward_sum = float(sum(ri_array))
+				self.lare_path_module.record_step(factors, env_reward_sum)
+
+				if self.use_lare_path_training and self.lare_path_module.is_trained:
+					proxy = self.lare_path_module.proxy_rewards(factors)
+					if proxy is not None:
+						ri_array = [float(x) for x in proxy]
+			except Exception as e:
+				print(f"[LaRe-Path] step hook error (falling back to env reward): {e}")
+
+		# LaRe-Task: surface the (possibly trained) proxy reward for this step's assignments
+		# so the PPO trainer can pick it up via info[...] without taking a hard dep on the env.
+		if self.use_lare_task and self.lare_task_module is not None:
+			info["lare_task_proxy_reward"] = self.lare_task_module.consume_step_proxy_reward()
+			info["lare_task_is_trained"] = bool(self.lare_task_module.is_trained)
+
 		if all(self.terminated) is True:
 			self.update_log(info)
+			# LaRe-Path: close out the episode and (when ready) trigger a decoder update.
+			if self.use_lare_path and self.lare_path_module is not None:
+				try:
+					self.lare_path_module.end_episode()
+				except Exception as e:
+					print(f"[LaRe-Path] end_episode error: {e}")
+			# LaRe-Task: episode-level training target is the task completion count.
+			if self.use_lare_task and self.lare_task_module is not None:
+				try:
+					self.lare_task_module.end_episode(self.task_completion)
+				except Exception as e:
+					print(f"[LaRe-Task] end_episode error: {e}")
 
 		return obs, ri_array, self.terminated, info
 	
