@@ -17,7 +17,7 @@ test_num: 1
 # このステップを超えたら learning ループを抜けて test_num 回の推論ループへ移行.
 # -1 を指定すると src/epymarl/src/config/default.yaml の t_max と同じ値が使われる
 # (経路計画の MARL 学習ステップと揃える用途).
-running_steps: 20000000
+running_steps: -1
 
 # =============================================================================
 # LaRe-Path (System A: 経路計画用) - 利用設定
