@@ -8,9 +8,36 @@ from copy import deepcopy
 import time
 import sys
 
+import yaml
+
 from src.policy import Policy
-from src.all_policy.policy_manager import PolicyManager 
+from src.all_policy.policy_manager import PolicyManager
 from src.task_assign.task_manager import TaskManager
+
+
+def _resolve_running_steps(args):
+    """running_steps == -1 のとき epymarl の t_max を流用する.
+
+    target: 経路計画の MARL (epymarl) 学習ステップと PPO タスク割当の学習打ち切り
+    ステップを揃えたいとき、`running_steps: -1` と書くだけで自動連動させる.
+    フォールバック: epymarl の config が読めない場合はデフォルト 20_000_000.
+    """
+    rs = getattr(args, "running_steps", None)
+    if rs is None or int(rs) >= 0:
+        return int(rs) if rs is not None else 20_000_000
+    # rs == -1 (or any negative) -> read epymarl t_max
+    cfg_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "src", "epymarl", "src", "config", "default.yaml",
+    )
+    try:
+        with open(cfg_path, "r") as f:
+            t_max = int(yaml.safe_load(f).get("t_max", 20_000_000))
+        print(f"[runner] running_steps=-1 -> using epymarl t_max={t_max}")
+        return t_max
+    except Exception as e:
+        print(f"[runner] running_steps=-1 fallback: failed to read t_max ({e}); using 20000000")
+        return 20_000_000
 
 class Runner():
     def __init__(self, args, env, reward_list, training=False):
@@ -33,7 +60,7 @@ class Runner():
         self.current_step = 0
         self.env_step = 0
         self.current_episode = 0
-        self.max_step = args.running_steps
+        self.max_step = _resolve_running_steps(args)
         self.batch_size = args.batch_size
         self.check_interval = 100000
         args.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')

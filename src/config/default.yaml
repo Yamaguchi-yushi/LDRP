@@ -1,22 +1,69 @@
+# =============================================================================
+# 実験設定 (頻繁に変更)
+# =============================================================================
+
+# --- 環境 / アルゴリズム選択 ---
 env_name: "drp_env:drp_safe-4agent_map_8x5-v2"
 #env_name: "drp_env:drp-5agent_map_8x5-v2"
-
 agent_num: 4
 map_name: "map_8x5"
-
 task_assigner: "tp"
 path_planner: "qmix"
 
+# --- 実行制御 ---
 time_limit: 1000
-
 test_num: 1
-
-n_envs: 8
+# PPO タスク割当の学習打ち切りステップ数 (累積環境ステップ).
+# このステップを超えたら learning ループを抜けて test_num 回の推論ループへ移行.
+# -1 を指定すると src/epymarl/src/config/default.yaml の t_max と同じ値が使われる
+# (経路計画の MARL 学習ステップと揃える用途).
 running_steps: 20000000
+
+# =============================================================================
+# LaRe-Path (System A: 経路計画用) - 利用設定
+# =============================================================================
+
+# 利用フラグ
+use_lare_path: false
+use_lare_path_training: true        # false: デコーダだけ学習、報酬は置換しない (検証用)
+
+# Pretrained モード (ロード + 凍結 / 推論専用)
+use_pretrained_lare_path: false
+pretrained_lare_path_model_path: null
+
+# Finetuning モード (ロード + 学習継続)
+use_finetuning_lare_path: false
+finetuning_lare_path_model_path: null
+
+# 自動保存
+lare_path_autosave: false
+lare_path_autosave_path: null       # null なら自動命名 (下部の命名規則参照)
+
+# =============================================================================
+# LaRe-Task (System B: タスク割当用) - 利用設定
+# =============================================================================
+
+use_lare_task: false
+use_lare_task_training: true
+
+use_pretrained_lare_task: false
+pretrained_lare_task_model_path: null
+
+use_finetuning_lare_task: false
+finetuning_lare_task_model_path: null
+
+lare_task_autosave: false
+lare_task_autosave_path: null
+
+# =============================================================================
+# 学習ハイパーパラメータ (基本固定)
+# =============================================================================
+
+# --- PPO (タスク割当) ---
+n_envs: 8
 buffer_size: 1024
 batch_size: 64
 epochs: 4
-
 learning_rate: 0.0003
 gamma: 0.99
 gae_lambda: 0.95
@@ -24,18 +71,11 @@ clip_epsilon: 0.2
 entropy_coef: 0.0001
 value_loss_coef: 0.5
 
-# --- LaRe-Path (System A) ---
-# Toggle: when false, behavior is identical to the original LDRP (no LaRe code path runs).
-# When true, the env initializes a LaRePathModule and either:
-#   - trains a reward decoder online (scratch mode), or
-#   - loads a pretrained decoder (pretrained mode, no further training), or
-#   - loads a checkpoint and continues training (finetuning mode).
-use_lare_path: false
-use_lare_path_training: true        # if false, factors/decoder are trained but rewards are NOT replaced
-lare_path_factor_dim: 10            # 10-element evaluation_func, matching Safe-TSL-DBCT
+# --- LaRe-Path 内部 ---
+lare_path_factor_dim: 10            # 10-element evaluation_func, Safe-TSL-DBCT 互換
 lare_path_decoder_hidden_dim: 64
 lare_path_decoder_n_layers: 3
-lare_path_use_transformer: false    # AREL Time-Agent Transformer (optional credit assignment)
+lare_path_use_transformer: false    # AREL Time-Agent Transformer (オプション)
 lare_path_transformer_heads: 4
 lare_path_transformer_depth: 2
 lare_path_buffer_capacity: 512
@@ -43,37 +83,9 @@ lare_path_min_buffer: 64
 lare_path_update_freq: 32
 lare_path_batch_size: 32
 lare_path_lr: 0.0005
+lare_path_save_dir: null            # null なら src/lare/path/saved_models/
 
-# Mode 3: pretrained (load + freeze, inference only).
-# Set use_pretrained_lare_path: true and provide a path/filename.
-# Resolution order: absolute path -> relative to repo root -> src/lare/path/saved_models/.
-use_pretrained_lare_path: false
-pretrained_lare_path_model_path: null
-
-# Mode 4: finetuning (load + continue training).
-# Pretrained takes precedence if both flags are set.
-use_finetuning_lare_path: false
-finetuning_lare_path_model_path: null
-
-# Autosave during training (scratch or finetuning).
-# Naming convention (PATH token + dedicated folder distinguish from Task models):
-#   scratch:    "{Safe}_{ALGO}_PATH_{map}_{N}agents_{X.X}M_checkpoint.pth"
-#   finetuning: "FT_{Safe}_{source_base}_{map}_{N}agents_{X.X}M_checkpoint.pth"
-# - Safe   = "Safe" when running on drp_safe-... env, else empty (no leading underscore)
-# - ALGO   = uppercased algorithm name detected from --config CLI arg (e.g. QMIX, IQL)
-# - {X.X}M = cumulative step count in millions
-# Files land under `lare_path_save_dir` (default: src/lare/path/saved_models/).
-# Set lare_path_autosave_path to override with an explicit fixed path.
-lare_path_autosave: false
-lare_path_autosave_path: null
-lare_path_save_dir: null    # null = src/lare/path/saved_models/ relative to repo root
-
-# --- LaRe-Task (System B) ---
-# Replaces sum(rew_n) in PPO task assigner with a proxy reward derived from a
-# 10-factor encoder over each assignment decision (defined in src/lare/task/encoder.py).
-# Same 4 modes as LaRe-Path (off / scratch / pretrained / finetuning).
-use_lare_task: false
-use_lare_task_training: true
+# --- LaRe-Task 内部 ---
 lare_task_factor_dim: 10
 lare_task_decoder_hidden_dim: 64
 lare_task_decoder_n_layers: 2
@@ -82,16 +94,19 @@ lare_task_min_buffer: 32
 lare_task_update_freq: 16
 lare_task_batch_size: 32
 lare_task_lr: 0.0005
+lare_task_save_dir: null            # null なら src/lare/task/saved_models/
 
-use_pretrained_lare_task: false
-pretrained_lare_task_model_path: null
-
-use_finetuning_lare_task: false
-finetuning_lare_task_model_path: null
-
-# Autosave naming for task models (TASK token + dedicated folder):
-#   scratch:    "{Safe}_{ALGO}_TASK_{map}_{N}agents_{X.X}M_checkpoint.pth"
-#   finetuning: "FT_{Safe}_{source_base}_{map}_{N}agents_{X.X}M_checkpoint.pth"
-lare_task_autosave: false
-lare_task_autosave_path: null
-lare_task_save_dir: null    # null = src/lare/task/saved_models/
+# =============================================================================
+# 命名規則・参考情報 (読むだけ)
+# =============================================================================
+# モデル保存ファイル名:
+#   scratch:    "{Safe_}{ALGO}_{PATH|TASK}_{map}_{N}agents_{X.X}M_checkpoint.pth"
+#   finetuning: "FT_{Safe_}{source_base}_{map}_{N}agents_{X.X}M_checkpoint.pth"
+# - Safe_   = "Safe_" when SafeEnv (drp_safe-...) else 空 (先頭 _ も省略)
+# - ALGO    = --config=qmix 等の CLI を大文字化 (検出失敗時は UNKNOWN)
+# - {X.X}M  = 累積ステップ数 (100万単位)
+# - 保存先: src/lare/{path,task}/saved_models/
+#
+# pretrained / finetuning モデルパスの解決順:
+#   1. 絶対パス → 2. 相対パス (cwd) → 3. リポジトリルート相対 → 4. saved_models/ 配下
+#   いずれも .pth 拡張子無しで指定可
