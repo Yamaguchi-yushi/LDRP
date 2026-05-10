@@ -6,3 +6,6 @@ logs/
 results/
 train_results/
 **/models/
+.claude/
+src/lare/path/saved_models/
+src/lare/task/saved_models/
