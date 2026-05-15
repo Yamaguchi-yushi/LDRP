@@ -1,0 +1,9 @@
+# LDRP の主要依存パッケージ. Python 3.9 を前提.
+# 詳細セットアップ手順: ./setup_env.sh または MANUAL.md を参照.
+
+gym==0.26.2
+networkx==3.2.1
+numpy==1.26.4
+torch==2.8.0
+PyYAML==6.0.3
+matplotlib==3.8.2
