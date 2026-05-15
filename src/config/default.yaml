@@ -12,7 +12,9 @@ path_planner: "qmix"
 
 # --- 実行制御 ---
 time_limit: 1000
-test_num: 10
+test_num: 1
+# タスク割当の選択肢・結果を stdout に出力 (実際に何かを割当てたステップだけ)
+debug_task_assign: True
 # PPO タスク割当の学習打ち切りステップ数 (累積環境ステップ).
 # このステップを超えたら learning ループを抜けて test_num 回の推論ループへ移行.
 # -1 を指定すると src/epymarl/src/config/default.yaml の t_max と同じ値が使われる

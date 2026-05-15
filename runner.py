@@ -130,10 +130,10 @@ class Runner():
                 self.tmp_flag = True
 
             #"""
-            if 1==0:
+            if True:
                 #print("############################")
                 print("step:", env_step)
-                print("agents_action:", agents_action)
+                #print("agents_action:", agents_action)
                 print("current_start:", self.env.current_start)
                 print("current_goal:", self.env.current_goal)
                 print("goal_array:", self.env.goal_array)
