@@ -81,6 +81,17 @@ print(f"  torch    : {torch.__version__}")
 print(f"  networkx : {networkx.__version__}")
 print(f"  PyYAML   : {yaml.__version__}")
 
+# epymarl 学習 (train.py) で必須の追加依存も確認
+import sacred, einops
+try:
+    import tensorboard_logger as _tbl
+    tbl_ver = getattr(_tbl, "__version__", "ok")
+except Exception as e:
+    tbl_ver = f"NG ({e})"
+print(f"  sacred              : {sacred.__version__}")
+print(f"  einops              : {einops.__version__}")
+print(f"  tensorboard-logger  : {tbl_ver}")
+
 import sys
 sys.path.append("${REPO_ROOT}")
 sys.path.append("${REPO_ROOT}/src/main")

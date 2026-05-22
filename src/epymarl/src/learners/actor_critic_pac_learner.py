@@ -7,6 +7,7 @@ from utils.rl_utils import build_td_lambda_targets
 import torch as th
 from torch.optim import Adam
 from modules.critics import REGISTRY as critic_resigtry
+from modules.critics import register_pac_critics
 from einops import rearrange
 from components.standarize_stream import RunningMeanStd
 
@@ -17,10 +18,13 @@ class PACActorCriticLearner:
         self.n_actions = args.n_actions
         self.logger = logger
 
+        # Register PAC-specific critics (lazy: depends on torch_scatter for pac_dcg_ns).
+        register_pac_critics()
+
         self.mac = mac
         self.agent_params = list(mac.parameters())
         self.agent_optimiser = Adam(params=self.agent_params, lr=args.lr)
-        
+
         self.critic = critic_resigtry[args.critic_type](scheme, args)
         self.target_critic = copy.deepcopy(self.critic)
         self.state_value = critic_resigtry[args.state_value_type](scheme, args)

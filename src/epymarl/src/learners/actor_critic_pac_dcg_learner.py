@@ -5,6 +5,7 @@ from utils.rl_utils import build_td_lambda_targets
 import torch as th
 from torch.optim import Adam
 from modules.critics import REGISTRY as critic_resigtry
+from modules.critics import register_pac_critics
 from einops import rearrange
 from components.standarize_stream import RunningMeanStd
 
@@ -15,6 +16,9 @@ class PACDCGLearner:
         self.n_agents = args.n_agents
         self.n_actions = args.n_actions
         self.logger = logger
+
+        # Register PAC-specific critics (lazy: depends on torch_scatter for pac_dcg_ns).
+        register_pac_critics()
 
         self.mac = mac
         self.agent_params = list(mac.parameters())

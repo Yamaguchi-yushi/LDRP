@@ -80,7 +80,12 @@ class _GymmaWrapper(MultiAgentEnv):
         self.original_env = gym.make(f"{key}", **kwargs)
         self.episode_limit = time_limit
         self._env = TimeLimit(self.original_env, max_episode_steps=time_limit)
-        self._env = FlattenObservation(self._env)
+        # gym 0.26+ で ObservationWrapper.reset() が `obs, info = self.env.reset()`
+        # を行うため, drp_env の legacy reset (obs だけ) を 2-agent ケースで誤って
+        # (obs=row0, info=row1) と unpack して落ちる. drp_env の obs は既に
+        # per-agent flat なので FlattenObservation は実質 no-op であり, 無効化
+        # すれば gym 0.21/0.26 両方で動く.
+        # self._env = FlattenObservation(self._env)
 
         if pretrained_wrapper:
             self._env = getattr(pretrained, pretrained_wrapper)(self._env)

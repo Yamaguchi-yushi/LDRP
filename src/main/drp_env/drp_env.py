@@ -546,6 +546,14 @@ class DrpEnv(gym.Env):
 	def get_avail_agent_actions(self, agent_id, n_actions):
 		return self._get_avail_agent_actions(agent_id, n_actions)
 
+	def seed(self, seed=None):
+		"""Gym 0.21 互換シード設定. gym 0.26 で削除された API だが epymarl の
+		gymma wrapper (src/epymarl/src/envs/__init__.py) が直接呼ぶため互換実装.
+		drp_env は task 生成等に np.random グローバル状態を使うのでこれをシード."""
+		if seed is not None:
+			np.random.seed(int(seed))
+		return [seed]
+
 	def reset(self):
 		# if goal and start are not assigned, randomly generate every episode    
 		self.start_ori_array = copy.deepcopy(self.ee_env.input_start_ori_array)
@@ -599,7 +607,7 @@ class DrpEnv(gym.Env):
 		obs = self.obs_manager.calc_obs()
 
 		return obs
-		
+
 
 	def _default_task_assign_tp(self):
 		"""Built-in nearest-pending-task assigner used when the caller does not
