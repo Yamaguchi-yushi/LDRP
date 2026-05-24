@@ -62,6 +62,10 @@ class LaRePathConfig:
     # Either a fixed string path, or a zero-arg callable returning a path
     # (callable form lets the caller embed mutable state like step counts).
     autosave_path: Optional[object] = None
+    # 保存を間引くしきい値: 前回保存時の累積ステップから save_freq_steps 以上進んだ
+    # ときだけ実際にファイルへ書き出す. デコーダ学習自体は update_freq 通り走る
+    # ので、学習頻度 ≠ 保存頻度 を独立に制御できる. 0 にすると毎更新ごとに保存.
+    save_freq_steps: int = 500_000
 
 
 class LaRePathModule:
@@ -117,6 +121,10 @@ class LaRePathModule:
         self.last_loss = None
         self.use_lare_training = bool(self.cfg.use_lare_training)
         self.frozen = bool(self.cfg.frozen)
+        # save_freq_steps での保存間引き用. 前回保存時の累積環境ステップ.
+        # 0 で初期化 → 最初の保存は save_freq_steps (= デフォ 0.5M) を超えた時点.
+        # 0 step ではセーブしない.
+        self._last_saved_step = 0
 
     def compute_factors(self, prev_onehot_position, current_colliding_pairs):
         """Compute the (n_agents, factor_dim) factor matrix for the current step.
@@ -206,10 +214,17 @@ class LaRePathModule:
 
         if self.cfg.autosave_path:
             try:
-                target = self.cfg.autosave_path
-                if callable(target):
-                    target = target()
-                self.save_model(target)
+                # 保存頻度の throttle: 前回保存時の累積ステップから save_freq_steps
+                # 以上進んでいる時だけ実際に保存. デコーダ更新自体は update_freq
+                # 通り続行するので学習頻度には影響しない.
+                current_step = int(getattr(self.env, "_lare_total_step_account", 0))
+                freq = int(max(0, self.cfg.save_freq_steps))
+                if freq == 0 or (current_step - self._last_saved_step) >= freq:
+                    target = self.cfg.autosave_path
+                    if callable(target):
+                        target = target()
+                    self.save_model(target)
+                    self._last_saved_step = current_step
             except Exception as e:
                 print(f"[LaRe-Path] autosave failed: {e}")
 

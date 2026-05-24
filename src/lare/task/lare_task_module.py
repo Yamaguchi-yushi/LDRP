@@ -45,6 +45,9 @@ class LaReTaskConfig:
     use_lare_training: bool = True
     frozen: bool = False
     autosave_path: Optional[object] = None  # str or zero-arg callable
+    # 保存間引きしきい値. 前回保存時の累積環境ステップから save_freq_steps 以上
+    # 進んだ時だけ保存. 0 にすると毎更新ごとに保存.
+    save_freq_steps: int = 500_000
 
 
 class LaReTaskModule:
@@ -75,6 +78,9 @@ class LaReTaskModule:
         self.episode_count = 0
         self.update_count = 0
         self.last_loss = None
+        # save_freq_steps の throttle 用. 0 で初期化 → 最初の保存は
+        # save_freq_steps を超えた時点. 0 step ではセーブしない.
+        self._last_saved_step = 0
 
         # Per-step bookkeeping (filled by record_step_assignments).
         self._last_step_proxy = 0.0
@@ -194,10 +200,15 @@ class LaReTaskModule:
 
         if self.cfg.autosave_path:
             try:
-                target = self.cfg.autosave_path
-                if callable(target):
-                    target = target()
-                self.save_model(target)
+                # 保存頻度 throttle (詳細は Path 側と同じ).
+                current_step = int(getattr(self.env, "_lare_total_step_account", 0))
+                freq = int(max(0, self.cfg.save_freq_steps))
+                if freq == 0 or (current_step - self._last_saved_step) >= freq:
+                    target = self.cfg.autosave_path
+                    if callable(target):
+                        target = target()
+                    self.save_model(target)
+                    self._last_saved_step = current_step
             except Exception as e:
                 print(f"[LaRe-Task] autosave failed: {e}")
 

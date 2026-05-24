@@ -85,7 +85,8 @@ lare_path_min_buffer: 256
 lare_path_update_freq: 3
 lare_path_batch_size: 32
 lare_path_lr: 0.0005
-lare_path_save_dir: null            # null なら src/lare/path/saved_models/
+lare_path_save_freq_steps: 500000   # 累積環境ステップ 0.5M ごとに 1 回保存 (= 学習頻度とは独立)
+lare_path_save_dir: null            # deprecated: 旧 saved_models/ 用 (load の後方互換のみ). 新規 autosave は src/lare/path/checkpoints/ 固定
 
 # --- LaRe-Task 内部 ---
 lare_task_factor_dim: 10
@@ -96,7 +97,8 @@ lare_task_min_buffer: 256
 lare_task_update_freq: 3
 lare_task_batch_size: 32
 lare_task_lr: 0.0005
-lare_task_save_dir: null            # null なら src/lare/task/saved_models/
+lare_task_save_freq_steps: 500000   # 0.5M ごとに保存 (= Path 側と同じ)
+lare_task_save_dir: null            # deprecated: 旧 saved_models/ 用 (load の後方互換のみ). 新規 autosave は src/lare/task/checkpoints/ 固定
 
 # =============================================================================
 # 命名規則・参考情報 (読むだけ)
@@ -107,8 +109,18 @@ lare_task_save_dir: null            # null なら src/lare/task/saved_models/
 # - Safe_   = "Safe_" when SafeEnv (drp_safe-...) else 空 (先頭 _ も省略)
 # - ALGO    = --config=qmix 等の CLI を大文字化 (検出失敗時は UNKNOWN)
 # - {X.X}M  = 累積ステップ数 (100万単位)
-# - 保存先: src/lare/{path,task}/saved_models/
+#
+# ディレクトリ構成 (固定):
+#   src/lare/path/
+#     ├── checkpoints/   ← autosave 出力 (大量蓄積, .gitignore)
+#     └── models/        ← pretrained/finetuning ロード元 (整理済み, git 公開)
+#   src/lare/task/  ← Path と同じ構造
 #
 # pretrained / finetuning モデルパスの解決順:
-#   1. 絶対パス → 2. 相対パス (cwd) → 3. リポジトリルート相対 → 4. saved_models/ 配下
+#   1. 絶対パス
+#   2. カレントディレクトリ相対
+#   3. リポジトリルート相対
+#   4. src/lare/{path,task}/models/      ← 正規の置き場
+#   5. src/lare/{path,task}/checkpoints/ ← autosave 出力からも直接読込可能
+#   6. src/lare/{path,task}/saved_models/ ← 旧パス (後方互換)
 #   いずれも .pth 拡張子無しで指定可

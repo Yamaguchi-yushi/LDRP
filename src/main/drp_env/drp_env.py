@@ -62,7 +62,11 @@ class DrpEnv(gym.Env):
 			finetuning_lare_task_model_path=None,
 			lare_task_autosave=False,
 			lare_task_autosave_path=None,
-			lare_task_save_dir=None,
+			lare_task_save_dir=None,           # deprecated: 旧 saved_models/ 用 (load の後方互換解決にのみ使用)
+			# 保存間引きしきい値 (= 累積環境ステップ). デフォルト 500_000 = 0.5M ごとに保存.
+			# 学習頻度 (update_freq) とは独立. 0 にすると毎更新ごとに保存.
+			lare_path_save_freq_steps=500_000,
+			lare_task_save_freq_steps=500_000,
 			# PBS 互換モード: True にすると待機分岐で current_goal を非 None に保つ
 			# (PBS の path 計画で必要). False にすると SafeEnv の保護が待機 agent
 			# にも効く. デフォルト False = 安全制御優先 (詳細は CLAUDE.md).
@@ -168,6 +172,9 @@ class DrpEnv(gym.Env):
 		self.lare_task_module = None
 		# Parallel to current_tasklist: per-task creation step (set when task added).
 		self._lare_task_creation_steps = []
+		# 保存間引きしきい値 (累積環境ステップ単位). LaRe-Path/Task の自動保存に適用.
+		self.lare_path_save_freq_steps = int(lare_path_save_freq_steps)
+		self.lare_task_save_freq_steps = int(lare_task_save_freq_steps)
 
 		if self.use_lare_path:
 			self._init_lare_path(
@@ -205,6 +212,15 @@ class DrpEnv(gym.Env):
 		return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 	def _lare_default_save_dir(self):
+		# autosave 出力先 (= 大量に蓄積される). 固定パス. gitignore 対象.
+		return os.path.join(self._lare_repo_root(), "src", "lare", "path", "checkpoints")
+
+	def _lare_default_models_dir(self):
+		# pretrained / finetuning ロード元 (= 整理済み). 固定パス. git 公開対象.
+		return os.path.join(self._lare_repo_root(), "src", "lare", "path", "models")
+
+	def _lare_legacy_saved_models_dir(self):
+		# 旧 saved_models/ ディレクトリ. 後方互換のため load 解決パスに残す.
 		return self.lare_path_save_dir or os.path.join(self._lare_repo_root(), "src", "lare", "path", "saved_models")
 
 	def _lare_get_safe_prefix(self):
@@ -286,6 +302,15 @@ class DrpEnv(gym.Env):
 
 	# ---------------- LaRe-Task naming helpers (Safe-TSL-DBCT convention, _LARETASK suffix) ----------------
 	def _lare_task_default_save_dir(self):
+		# autosave 出力先 (Task 側). 固定パス. gitignore 対象.
+		return os.path.join(self._lare_repo_root(), "src", "lare", "task", "checkpoints")
+
+	def _lare_task_default_models_dir(self):
+		# pretrained / finetuning ロード元 (Task 側). 固定パス. git 公開対象.
+		return os.path.join(self._lare_repo_root(), "src", "lare", "task", "models")
+
+	def _lare_task_legacy_saved_models_dir(self):
+		# 旧 saved_models/ (Task 側). load の後方互換解決パスに残す.
 		return self.lare_task_save_dir or os.path.join(self._lare_repo_root(), "src", "lare", "task", "saved_models")
 
 	def _lare_task_get_source_base_name(self):
@@ -378,6 +403,7 @@ class DrpEnv(gym.Env):
 				use_lare_training=self.use_lare_path_training,
 				frozen=cfg_frozen,
 				autosave_path=autosave,
+				save_freq_steps=self.lare_path_save_freq_steps,
 			)
 			self.lare_path_module = LaRePathModule(self, cfg)
 
@@ -397,16 +423,30 @@ class DrpEnv(gym.Env):
 			self.lare_path_module = None
 
 	def _load_lare_path_weights(self, model_path, freeze, label):
-		"""Try common locations for `model_path`, then call module.load_model(..., freeze=freeze)."""
+		"""Try common locations for `model_path`, then call module.load_model(..., freeze=freeze).
+
+		解決順:
+		  1. 絶対パス
+		  2. カレントディレクトリ相対
+		  3. リポジトリルート相対
+		  4. **src/lare/path/models/** 配下 (= 整理済みモデルの正規置き場)
+		  5. src/lare/path/checkpoints/ 配下 (= autosave 出力からの直接読込にも対応)
+		  6. src/lare/path/saved_models/ 配下 (= 旧パスの後方互換)
+		上記いずれも .pth 拡張子なしで指定された場合は .pth を補完.
+		"""
 		repo_root = self._lare_repo_root()
-		save_dir = self._lare_default_save_dir()
+		models_dir = self._lare_default_models_dir()
+		checkpoint_dir = self._lare_default_save_dir()
+		legacy_dir = self._lare_legacy_saved_models_dir()
 		candidates = []
 		if os.path.isabs(model_path):
 			candidates.append(model_path)
 		else:
 			candidates.append(model_path)
 			candidates.append(os.path.join(repo_root, model_path))
-			candidates.append(os.path.join(save_dir, model_path))
+			candidates.append(os.path.join(models_dir, model_path))
+			candidates.append(os.path.join(checkpoint_dir, model_path))
+			candidates.append(os.path.join(legacy_dir, model_path))
 		# Allow filenames without extension.
 		extra = []
 		for p in candidates:
@@ -464,6 +504,7 @@ class DrpEnv(gym.Env):
 				use_lare_training=self.use_lare_task_training,
 				frozen=cfg_frozen,
 				autosave_path=autosave,
+				save_freq_steps=self.lare_task_save_freq_steps,
 			)
 
 			# Reuse LaRe-Path's graph_diameter when available (saves a Dijkstra all-pairs).
@@ -487,15 +528,22 @@ class DrpEnv(gym.Env):
 			self.lare_task_module = None
 
 	def _load_lare_task_weights(self, model_path, freeze, label):
+		# 解決順 (Path 側と対称):
+		#   1. 絶対 → 2. cwd 相対 → 3. repo root 相対
+		#   → 4. src/lare/task/models/ → 5. src/lare/task/checkpoints/ → 6. saved_models/ (後方互換)
 		repo_root = self._lare_repo_root()
-		save_dir = self._lare_task_default_save_dir()
+		models_dir = self._lare_task_default_models_dir()
+		checkpoint_dir = self._lare_task_default_save_dir()
+		legacy_dir = self._lare_task_legacy_saved_models_dir()
 		candidates = []
 		if os.path.isabs(model_path):
 			candidates.append(model_path)
 		else:
 			candidates.append(model_path)
 			candidates.append(os.path.join(repo_root, model_path))
-			candidates.append(os.path.join(save_dir, model_path))
+			candidates.append(os.path.join(models_dir, model_path))
+			candidates.append(os.path.join(checkpoint_dir, model_path))
+			candidates.append(os.path.join(legacy_dir, model_path))
 		extra = []
 		for p in candidates:
 			if not p.endswith(".pth"):

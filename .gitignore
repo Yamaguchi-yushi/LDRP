@@ -6,7 +6,17 @@ logs/
 results/
 train_results/
 **/models/
+# src/lare/{path,task}/models/ は **/models/ の例外で git 公開する.
+# (整理済みの pretrained / finetuning モデルをここに置く運用)
+!src/lare/path/models/
+!src/lare/path/models/**
+!src/lare/task/models/
+!src/lare/task/models/**
+# src/lare/{path,task}/checkpoints/ は autosave 出力. 大量蓄積されるので git 外.
+src/lare/path/checkpoints/
+src/lare/task/checkpoints/
 .claude/settings.local.json
 .claude/*.local.*
+# 旧パス saved_models/ も後方互換のためサポートしているが git 管理外
 src/lare/path/saved_models/
 src/lare/task/saved_models/

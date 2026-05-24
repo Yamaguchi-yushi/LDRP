@@ -86,7 +86,13 @@ LDRP/
 - 4 モード (off / scratch / pretrained / finetuning) は両システムで対称
 - 保存ファイル命名: `{Safe_}{ALGO}_{PATH|TASK}_{map}_{N}agents_{X.X}M_{checkpoint|final}.pth`
   - `Safe_` は SafeEnv のときのみ。非Safe では先頭 `_` ごと省略
-  - フォルダは `src/lare/path/saved_models/` と `src/lare/task/saved_models/` で分離
+- ディレクトリ構成 (固定. yaml で変更不要):
+  - `src/lare/path/checkpoints/` ← autosave 出力 (大量蓄積, **.gitignore**)
+  - `src/lare/path/models/` ← pretrained / finetuning ロード元 (整理済み, **git 公開**)
+  - Task 側 (`src/lare/task/`) も同じ構造
+  - 旧 `saved_models/` は load の後方互換用に解決パスに残るが新規利用は非推奨
+- **autosave 保存頻度**: 累積環境ステップ `lare_*_save_freq_steps` (デフォ 500_000 = 0.5M) ごとに 1 回。学習頻度 (`update_freq`) とは独立
+- 良いモデルが見つかったら `cp checkpoints/Safe_..._X.XM_checkpoint.pth models/<好きな名前>.pth` で `models/` にコピー → 次回 `pretrained_lare_*_model_path` でファイル名だけ指定すれば自動解決
 - 既存ファイルへの編集は最小限。新機能は新ディレクトリに分離
 
 ### SafeEnv と PBS のトレードオフ (= `pbs_mode` フラグで切替可能)

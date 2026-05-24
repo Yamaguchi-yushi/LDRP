@@ -54,6 +54,7 @@ if __name__ == "__main__":
         "lare_path_autosave",
         "lare_path_autosave_path",
         "lare_path_save_dir",
+        "lare_path_save_freq_steps",
         # LaRe-Task (System B)
         "use_lare_task",
         "use_lare_task_training",
@@ -72,6 +73,7 @@ if __name__ == "__main__":
         "lare_task_autosave",
         "lare_task_autosave_path",
         "lare_task_save_dir",
+        "lare_task_save_freq_steps",
     ]
     lare_kwargs = {k: getattr(config, k) for k in lare_path_keys if hasattr(config, k)}
 
