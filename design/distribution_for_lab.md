@@ -157,7 +157,145 @@ python test.py map_8x5 4 pbs tp    # pbs_mode=True になる
 
 ---
 
-### Step 3: `requirements.txt` をリポジトリ直下に作成
+### Step 3: `train.py` に `train_results/` の自動作成を追加
+
+**目的**: kaji-ou/LDRP の `train.py` は各サブプロセスのログを `> train_results/{i} 2>&1` でリダイレクトするが、`train_results/` ディレクトリが存在しないと sh のリダイレクトが即エラーで死に、**3 プロセスとも 1 秒以内に終了して `All runs completed.` だけが出力される** 状態になる (= 学習が走らないのに成功したように見える事故)。clone 直後の研究室メンバが必ず踏むのでスクリプト側で塞ぐ。
+
+#### 修正内容
+
+`train.py` の冒頭の `import` 直下に以下を追加:
+
+```python
+import os
+
+# 各サブプロセスがログをリダイレクトする先. 存在しないと sh の `>` が即エラーで
+# 死に、`All runs completed.` だけが出て学習が走らない (= 静かに失敗する) 事故を防ぐ.
+os.makedirs("train_results", exist_ok=True)
+```
+
+(配置場所目安: 既存の `import subprocess` / `import time` の直下)
+
+#### 検証
+
+```bash
+rm -rf train_results
+python train.py &
+sleep 2
+ls train_results/   # → 0, 1, 2 が生成されていれば OK
+kill %1
+```
+
+`train_results/` が事前に無くても自動で作られ、各サブプロセスのログが書き出されていれば成功。
+
+---
+
+### Step 4: epymarl の gym 0.26 / torch_scatter 互換修正
+
+**目的**: kaji-ou/LDRP の epymarl は **gym 0.21 + 全 critic eager import** を前提に書かれているが、配布版では `requirements.txt` で gym 0.26.2 を採用し、また `torch_scatter` を必須にすると配布の敷居が大きく上がる (= torch のバージョンと一致する wheel が公開されていないとビルドが必要)。以下 4 つの修正で **qmix / iql / vdn / maa2c が gym 0.26 + `torch_scatter` 無し** で起動できるようにする。
+
+**修正前に出るエラー例**:
+
+```text
+ModuleNotFoundError: No module named 'torch_scatter'
+  File ".../modules/critics/__init__.py", line 10, in <module>
+    from .pac_dcg_ns import DCGCriticNS
+```
+
+#### 4.1 `src/epymarl/src/modules/critics/__init__.py` を遅延ロード化
+
+PAC 系 critic の eager import を削除し、登録を関数化:
+
+```diff
+ from .ac import ACCritic
+ from .ac_ns import ACCriticNS
+-from .pac_ac_ns import PACCriticNS
+-from .pac_dcg_ns import DCGCriticNS
+
+
+ REGISTRY = {}
+ ...
+ REGISTRY["ac_critic"] = ACCritic
+ REGISTRY["ac_critic_ns"] = ACCriticNS
+-REGISTRY["pac_critic_ns"] = PACCriticNS
+-REGISTRY["pac_dcg_critic_ns"] = DCGCriticNS
++
++
++def register_pac_critics():
++    """PAC critics の遅延登録. pac_dcg_ns が torch_scatter (heavy/optional)
++    に依存するため eager import を避け, PAC learner 側から必要時のみ呼ぶ."""
++    from .pac_ac_ns import PACCriticNS
++    from .pac_dcg_ns import DCGCriticNS
++    REGISTRY["pac_critic_ns"] = PACCriticNS
++    REGISTRY["pac_dcg_critic_ns"] = DCGCriticNS
+```
+
+#### 4.2 PAC learner 2 ファイルで `register_pac_critics()` を呼び出す
+
+`src/epymarl/src/learners/actor_critic_pac_learner.py` と `src/epymarl/src/learners/actor_critic_pac_dcg_learner.py` の両方に、`__init__` の冒頭で register を呼ぶ:
+
+```diff
+ from modules.critics import REGISTRY as critic_resigtry
++from modules.critics import register_pac_critics
+ ...
+ class PACActorCriticLearner:   # pac_dcg_learner 側は PACDCGLearner
+     def __init__(self, mac, scheme, logger, args):
+         ...
+         self.logger = logger
++
++        # PAC critic を遅延登録 (pac_dcg_ns は torch_scatter 依存).
++        register_pac_critics()
+
+         self.mac = mac
+```
+
+#### 4.3 `src/epymarl/src/envs/__init__.py` の `FlattenObservation` を無効化
+
+gym 0.26 の `ObservationWrapper.reset()` は `obs, info = self.env.reset()` を期待するが、drp_env の legacy reset は `obs` のみを返すため、2-agent の obs 2 行を `(obs, info)` と誤 unpack して落ちる。drp_env の obs は既に per-agent flat なので、この wrapper は no-op であり、コメントアウトで問題ない:
+
+```diff
+ self._env = TimeLimit(self.original_env, max_episode_steps=time_limit)
+-self._env = FlattenObservation(self._env)
++# gym 0.26+ で ObservationWrapper.reset() が (obs, info) を期待し,
++# drp_env の obs だけ返す reset を誤 unpack するため無効化. obs は既に
++# per-agent flat なので wrapper は no-op.
++# self._env = FlattenObservation(self._env)
+```
+
+#### 4.4 `src/main/drp_env/drp_env.py` に `seed()` 互換メソッドを追加
+
+gym 0.26 で `Env.seed` は削除されたが、epymarl の gymma wrapper は依然として直接 `env.seed()` を呼ぶ。互換メソッドを追加:
+
+```python
+def seed(self, seed=None):
+    """gym 0.21 互換シード設定. gym 0.26 で削除された API だが epymarl の
+    gymma wrapper (src/epymarl/src/envs/__init__.py) が直接呼ぶため互換実装.
+    drp_env は task 生成等に np.random グローバル状態を使うのでこれをシード."""
+    if seed is not None:
+        np.random.seed(int(seed))
+    return [seed]
+```
+
+(配置場所目安: `DrpEnv` クラス内、`reset()` メソッドのすぐ上)
+
+#### 検証
+
+```bash
+conda activate ldrp
+# 4.1 / 4.2: torch_scatter 無しでも learners が import できるか
+cd src/epymarl/src
+python -c "from learners import REGISTRY; print(list(REGISTRY.keys())[:3])"
+# → エラーが出ず, ['q_learner', ...] のようなリストが出れば OK
+cd -
+
+# 4.3 / 4.4: 実際の学習起動
+python train.py
+# 数秒後に tail -f train_results/0 して "Episode" や "[INFO]" 等の epymarl
+# ログが流れ始めれば 4.3 (reset) / 4.4 (seed) も含めて OK. Ctrl+C で停止.
+```
+
+---
+
+### Step 5: `requirements.txt` をリポジトリ直下に作成
 
 **目的**: 動作確認済みバージョンを固定して再現性を確保。
 
@@ -198,7 +336,7 @@ git+https://github.com/oxwhirl/smac.git
 
 ---
 
-### Step 4: `setup_env.sh` をリポジトリ直下に作成
+### Step 6: `setup_env.sh` をリポジトリ直下に作成
 
 **目的**: `./setup_env.sh` 1 コマンドで conda env "ldrp" を作成 + 依存インストール + 動作確認まで自動化。
 
@@ -331,7 +469,7 @@ chmod +x setup_env.sh
 
 ---
 
-### Step 5: README.md にセットアップ手順を追記
+### Step 7: README.md にセットアップ手順を追記
 
 **目的**: clone した人がまず読む README に、最低限のセットアップ手順を明示。
 
@@ -367,7 +505,7 @@ python test.py
 
 ---
 
-### Step 6: 動作確認
+### Step 8: 動作確認
 
 すべての手順が完了したら、以下のスモークテストを実行:
 
@@ -396,15 +534,11 @@ python train.py
 
 研究室配布前に以下が全て満たされていることを確認:
 
-- [ ] `src/main/drp_env/drp_env.py` に `pbs_mode` パラメータが追加されている
-- [ ] `src/main/drp_env/drp_env.py` の待機分岐が `if self.pbs_mode:` でガードされている
-- [ ] `test.py` で `pbs_mode = (config.path_planner == "pbs")` が `gym.make` に渡されている
-- [ ] `requirements.txt` が repo root に存在し、上記内容と一致している
-- [ ] `setup_env.sh` が repo root に存在し、実行権限が付与されている
-- [ ] `README.md` に Quick Start セクションが追加されている
-- [ ] `./setup_env.sh` がクリーン環境 (= 新規 anaconda) でエラーなく完走する
-- [ ] `python test.py map_8x5 4 qmix tp` が動作する
-- [ ] `python test.py map_8x5 4 pbs tp` が動作する
+- [ ] `train.py` の冒頭に `os.makedirs("train_results", exist_ok=True)` が追加されている
+- [ ] `epymarl/src/modules/critics/__init__.py` の `pac_*` が `register_pac_critics()` 関数経由の遅延ロードになっている
+- [ ] `epymarl/src/learners/actor_critic_pac_learner.py` と `actor_critic_pac_dcg_learner.py` で `register_pac_critics()` が `__init__` から呼ばれている
+- [ ] `epymarl/src/envs/__init__.py` で `FlattenObservation` がコメントアウトされている
+- [ ] `src/main/drp_env/drp_env.py` に `seed()` メソッドが追加されている
 
 ---
 
@@ -412,7 +546,7 @@ python train.py
 
 以下は **ユーザ自身** が手動で行うこと (受信側 Claude Code には委ねない):
 
-1. このディレクトリで `git status` 確認 → 上記 Step 1-5 の変更が全て含まれていることを確認
+1. このディレクトリで `git status` 確認 → 上記 Step 1-8 の変更が全て含まれていることを確認
 2. 変更をコミット (例: `git commit -m "feat: pbs_mode flag + setup_env.sh + requirements.txt"`)
 3. 研究室メンバ用の新しいリポジトリに push、または zip にして配布
 4. README.md の「Quick Start」を実行してもらう
@@ -452,7 +586,7 @@ python train.py
 
 このドキュメントの内容を一通り適用し終わったら、ユーザに以下を報告してください:
 
-- 完了したステップ番号 (例: "Step 1-6 を全て適用しました")
+- 完了したステップ番号 (例: "Step 1-8 を全て適用しました")
 - `setup_env.sh` を実行した結果の `verification OK` ログ
 - `python test.py map_8x5 4 qmix tp` の出力 (= 衝突数とタスク完了数)
 

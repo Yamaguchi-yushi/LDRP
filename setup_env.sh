@@ -88,9 +88,15 @@ try:
     tbl_ver = getattr(_tbl, "__version__", "ok")
 except Exception as e:
     tbl_ver = f"NG ({e})"
+try:
+    import tensorboard as _tb
+    tb_ver = _tb.__version__
+except Exception as e:
+    tb_ver = f"NG ({e})"
 print(f"  sacred              : {sacred.__version__}")
 print(f"  einops              : {einops.__version__}")
 print(f"  tensorboard-logger  : {tbl_ver}")
+print(f"  tensorboard         : {tb_ver}")
 
 import sys
 sys.path.append("${REPO_ROOT}")

@@ -11,7 +11,12 @@ matplotlib==3.8.2
 
 # --- epymarl 経由の MARL 学習 (train.py 用) ---
 # sacred:             epymarl の実験管理フレームワーク (main.py で必須)
-# tensorboard-logger: epymarl の use_tensorboard=True (デフォルト) で必須
+# tensorboard-logger: epymarl の use_tensorboard=True (デフォルト) で必須.
+#                     学習ログを results/tb_logs/ にイベントファイルとして書き出す.
+# tensorboard:        書き出されたイベントファイルを可視化する本体. 学習途中の
+#                     リアルタイム監視に使う (`tensorboard --logdir results/tb_logs`).
+#                     ==2.8.0 にピン: 研究室の元 drp env と合わせる + 最新版は
+#                     protobuf>=4 を要求して下の `protobuf<4` 制約と衝突するため.
 # einops:             PAC 系 learner が eager import するため qmix/iql/vdn でも必須
 #                     (learners/__init__.py の REGISTRY で全 learner を eager 登録するため)
 # 注意: PAC DCG critic は torch_scatter を要するが, critics/__init__.py の
@@ -19,6 +24,7 @@ matplotlib==3.8.2
 #       PAC DCG を実際に使うときだけ `pip install torch_scatter` する.
 sacred
 tensorboard-logger
+tensorboard==2.8.0
 einops
 # tensorboard-logger 0.1.0 が古い protobuf API を使うため <4 にピン.
 # 新しい protobuf (6 系) を入れると `Descriptors cannot be created directly` で死ぬ.
