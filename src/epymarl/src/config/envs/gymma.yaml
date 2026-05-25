@@ -2,7 +2,7 @@ env: "gymma"
 
 env_args:
   key: null
-  time_limit: 100
+  time_limit: 500
   state_repre_flag: "onehot"  # new
   pretrained_wrapper: null
 
@@ -12,4 +12,4 @@ test_interval: 50000
 log_interval: 50000
 runner_log_interval: 10000
 learner_log_interval: 10000
-t_max: 16050000
+t_max: 5050000
