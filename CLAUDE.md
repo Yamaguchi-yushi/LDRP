@@ -81,7 +81,9 @@ LDRP/
 
 これを破らない:
 
-- **`use_lare_path=False` かつ `use_lare_task=False` のとき、LDRP の挙動は LaRe 統合前と完全一致**。新フラグはデフォルトで全部この状態
+- **`use_lare_path=False` かつ `use_lare_task=False` のとき、LDRP の挙動は LaRe 統合前と完全一致** (baseline 条件は固定)。
+  - デフォルト値の単一の真実は [src/main/drp_env/drp_env.py](src/main/drp_env/drp_env.py) の `DrpEnv.__init__` シグネチャ。`drp_safe-*` の register kwargs では LaRe フラグを上書きしない (= signature の値がそのまま `gym.make` のデフォルトになる)
+  - 現状の signature デフォルト: `use_lare_path=True` (= LaRe-Path ON), `use_lare_task=False` (= LaRe-Task OFF)。baseline で動かしたいときは env_args (train.py) / yaml (test.py) / `gym.make` kwargs で `use_lare_path=False` を明示する
 - LaRe-Path / LaRe-Task は **完全に独立**。同時 ON 可能。バッファ・最適化器・保存先まで全部別
 - 4 モード (off / scratch / pretrained / finetuning) は両システムで対称
 - 保存ファイル命名: `{Safe_}{ALGO}_{PATH|TASK}_{map}_{N}agents_{X.X}M_{checkpoint|final}.pth`
