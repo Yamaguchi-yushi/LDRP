@@ -35,7 +35,7 @@ class DrpEnv(gym.Env):
 			lare_path_transformer_depth=2,
 			lare_path_buffer_capacity=1024,
 			lare_path_min_buffer=256,
-			lare_path_update_freq=3,
+			lare_path_update_freq=128,
 			lare_path_batch_size=256,
 			lare_path_lr=5e-4,
 			use_pretrained_lare_path=True,
@@ -53,7 +53,7 @@ class DrpEnv(gym.Env):
 			lare_task_decoder_n_layers=2,
 			lare_task_buffer_capacity=1024,
 			lare_task_min_buffer=256,
-			lare_task_update_freq=3,
+			lare_task_update_freq=128,
 			lare_task_batch_size=256,
 			lare_task_lr=5e-4,
 			use_pretrained_lare_task=False,
@@ -983,6 +983,7 @@ class DrpEnv(gym.Env):
 
 				if self.use_lare_path_training and self.lare_path_module.is_trained:
 					proxy = self.lare_path_module.proxy_rewards(factors)
+					print(f"[LaRe-Path] step {self.step_account} proxy reward: {proxy}")
 					if proxy is not None:
 						ri_array = [float(x) for x in proxy]
 			except Exception as e:

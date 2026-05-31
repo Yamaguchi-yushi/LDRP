@@ -130,21 +130,21 @@ class Runner():
                 self.tmp_flag = True
 
             #"""
-            if True:
-                #print("############################")
-                print("step:", env_step)
-                #print("agents_action:", agents_action)
-                print("current_start:", self.env.current_start)
-                print("current_goal:", self.env.current_goal)
-                print("goal_array:", self.env.goal_array)
-                print("obs", self.env.obs)
-                #print("current_tasklist:", self.env.current_tasklist)
-                #print("assigned_tasks:", self.env.assigned_tasks)
-                #print("assigned_list:", self.env.assigned_list)
-                #print("task_assign:", task_assign)
-                print("############################")
+            # if True:
+            #     #print("############################")
+            #     print("step:", env_step)
+            #     #print("agents_action:", agents_action)
+            #     print("current_start:", self.env.current_start)
+            #     print("current_goal:", self.env.current_goal)
+            #     print("goal_array:", self.env.goal_array)
+            #     print("obs", self.env.obs)
+            #     #print("current_tasklist:", self.env.current_tasklist)
+            #     #print("assigned_tasks:", self.env.assigned_tasks)
+            #     #print("assigned_list:", self.env.assigned_list)
+            #     #print("task_assign:", task_assign)
+            #     print("############################")
 
-            #"""
+            # #"""
 
         return episode_score, env_step, info
 

@@ -74,5 +74,11 @@ def get_logger():
     logger.addHandler(ch)
     logger.setLevel('DEBUG')
 
+    # サードパーティの DEBUG (matplotlib font_manager / PIL 等) は抑制.
+    # root を DEBUG にしているせいで子ロガーが NOTSET だと全部流れてしまうため,
+    # 個別に WARNING を明示して短絡させる.
+    logging.getLogger('matplotlib').setLevel(logging.WARNING)
+    logging.getLogger('PIL').setLevel(logging.WARNING)
+
     return logger
 

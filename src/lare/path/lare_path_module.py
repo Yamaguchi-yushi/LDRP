@@ -53,7 +53,10 @@ class LaRePathConfig:
     update_freq: int = 32
     batch_size: int = 32
     learning_rate: float = 5e-4
-    train_epochs: int = 1
+    # MARL4DRP の evaluation_period 方式に整合: update_freq (= 128) ごとに発火する
+    # 評価期間中、連続する train_epochs 個のエピソード末尾で fresh batch をサンプル
+    # して 1 step ずつ更新する (= MARL4DRP の evaluation_episodes=50 と同じ).
+    train_epochs: int = 50
     use_lare_training: bool = True
     # Pretrained-model mode. When frozen=True the decoder is used in eval-only mode
     # and end_episode() will NOT trigger optimizer updates.
@@ -126,6 +129,12 @@ class LaRePathModule:
         # 0 step ではセーブしない.
         self._last_saved_step = 0
 
+        # MARL4DRP の evaluation_period 状態機械 (drp_env.py:1340-1382 相当).
+        # update_freq ごとに True にセット → 連続する train_epochs ep で 1 step ずつ
+        # 更新 → カウンタが train_epochs に達したら False に戻す.
+        self._evaluation_active = False
+        self._evaluation_count = 0
+
     def compute_factors(self, prev_onehot_position, current_colliding_pairs):
         """Compute the (n_agents, factor_dim) factor matrix for the current step.
 
@@ -168,11 +177,25 @@ class LaRePathModule:
         if self.frozen:
             return
 
-        if (
-            len(self.buffer) >= self.cfg.min_buffer
-            and self.episode_count % max(1, self.cfg.update_freq) == 0
-        ):
+        # MARL4DRP の評価期間方式 (drp_env.py:1340-1382 相当):
+        #   1) update_freq ごとに評価期間を開始 (バッファが十分に溜まっていれば)
+        #   2) 評価期間中は毎エピソード末尾で fresh batch を 1 回 _update() する
+        #   3) train_epochs 個のエピソードを消化したら評価期間を閉じる
+        # トリガと最初の update は同じ呼び出しで起きる (= 128 ep 目も update が走る).
+        if not self._evaluation_active:
+            if (
+                len(self.buffer) >= self.cfg.min_buffer
+                and self.episode_count % max(1, self.cfg.update_freq) == 0
+            ):
+                self._evaluation_active = True
+                self._evaluation_count = 0
+
+        if self._evaluation_active:
             self._update()
+            self._evaluation_count += 1
+            if self._evaluation_count >= max(1, self.cfg.train_epochs):
+                self._evaluation_active = False
+                self._evaluation_count = 0
 
     def _update(self):
         if self.frozen:
@@ -191,22 +214,24 @@ class LaRePathModule:
         mask = (time_idx < lengths[:, None]).float()
         mask = mask.unsqueeze(1).expand(b, n_a, t)
 
-        for _ in range(max(1, self.cfg.train_epochs)):
-            self.decoder.train()
-            if self.transformer is not None:
-                self.transformer.train()
-                z = self.transformer(factors).unsqueeze(-1)
-                r_hat = self.decoder(z.squeeze(-1).unsqueeze(-1).expand(b, n_a, t, self.factor_dim))
-            else:
-                r_hat = self.decoder(factors)
-            r_hat = r_hat.squeeze(-1)
-            r_hat_masked = r_hat * mask
-            pred_return = r_hat_masked.sum(dim=[1, 2])
+        # MARL4DRP の train_step に対応: 1 batch sample + 1 optimizer step.
+        # 連続更新回数 (= MARL4DRP の evaluation_episodes) は end_episode 側の
+        # 評価期間ループが管理する (train_epochs 個のエピソードで本関数が連続呼出).
+        self.decoder.train()
+        if self.transformer is not None:
+            self.transformer.train()
+            z = self.transformer(factors).unsqueeze(-1)
+            r_hat = self.decoder(z.squeeze(-1).unsqueeze(-1).expand(b, n_a, t, self.factor_dim))
+        else:
+            r_hat = self.decoder(factors)
+        r_hat = r_hat.squeeze(-1)
+        r_hat_masked = r_hat * mask
+        pred_return = r_hat_masked.sum(dim=[1, 2])
 
-            loss = self.loss_fn(pred_return, returns)
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+        loss = self.loss_fn(pred_return, returns)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
         self.is_trained = True
         self.update_count += 1
@@ -251,20 +276,68 @@ class LaRePathModule:
             raise FileNotFoundError(f"LaRe-Path model file not found: {path}")
         payload = torch.load(path, map_location=self.device)
 
-        saved_factor_dim = int(payload.get("factor_dim", self.factor_dim))
-        if saved_factor_dim != self.factor_dim:
-            raise ValueError(
-                f"factor_dim mismatch: model={saved_factor_dim}, current={self.factor_dim}"
-            )
-
-        self.decoder.load_state_dict(payload["decoder_state_dict"])
+        if "decoder_state_dict" in payload:
+            # -- LDRP format --
+            saved_factor_dim = int(payload.get("factor_dim", self.factor_dim))
+            if saved_factor_dim != self.factor_dim:
+                raise ValueError(
+                    f"factor_dim mismatch: model={saved_factor_dim}, current={self.factor_dim}"
+                )
+            decoder_sd = payload["decoder_state_dict"]
+            transformer_sd = payload.get("transformer_state_dict")
+            update_count = int(payload.get("update_count", 0))
+            last_loss = payload.get("last_loss", None)
+            source = "LDRP"
+        elif "model_state_dict" in payload:
+            # -- MARL4DRP format --
+            decoder_sd = self._convert_marl4drp_state_dict(payload["model_state_dict"])
+            transformer_sd = None
+            update_count = int(payload.get("total_training_steps", 0))
+            last_loss = None
+            source = "MARL4DRP"
+        else:
+            raise KeyError("Unrecognized model file format: missing expected keys")
+        
+        self.decoder.load_state_dict(decoder_sd)
         self.decoder.eval()
-        if self.transformer is not None and payload.get("transformer_state_dict") is not None:
-            self.transformer.load_state_dict(payload["transformer_state_dict"])
+        if self.transformer is not None and transformer_sd is not None:
+            self.transformer.load_state_dict(transformer_sd)
             self.transformer.eval()
 
         self.is_trained = True
         self.is_pretrained = True
         self.frozen = bool(freeze)
-        self.update_count = int(payload.get("update_count", 0))
-        self.last_loss = payload.get("last_loss", None)
+        self.update_count = update_count
+        self.last_loss = last_loss
+        print(f"[LaRe-Path] Loaded weights from {source} format ({len(decoder_sd)} tensors)")
+
+    def _convert_marl4drp_state_dict(self, marl4drp_sd):
+        """Convert MARL4DRP's saved state dict to LDRP's decoder state dict format.
+
+        This is a best-effort conversion that relies on the two models having
+        identical architecture and compatible PyTorch versions. It will attempt
+        to extract the decoder weights from the MARL4DRP checkpoint, which may
+        contain additional parameters for other components. If the architectures
+        differ significantly, this conversion may fail or produce incorrect results.
+        """
+        target_sd = self.decoder.state_dict()
+        src_keys = sorted(marl4drp_sd.keys())
+        tgt_keys = sorted(target_sd.keys())
+
+        if len(src_keys) != len(tgt_keys):
+            raise ValueError(
+                f"State dict key count mismatch: MARL4DRP has {len(src_keys)} keys, "
+                f"but decoder expects {len(tgt_keys)} keys."
+            )
+        
+        converted_sd = {}
+        for sk, tk in zip(src_keys, tgt_keys):
+            sv = marl4drp_sd[sk]
+            tv = target_sd[tk]
+            if tuple(sv.shape) != tuple(tv.shape):
+                raise ValueError(
+                    f"Shape mismatch for key '{tk}': MARL4DRP shape {tuple(sv.shape)} vs "
+                    f"decoder shape {tuple(tv.shape)}"
+                )
+            converted_sd[tk] = sv
+        return converted_sd

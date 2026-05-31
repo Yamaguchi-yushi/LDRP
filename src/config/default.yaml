@@ -82,7 +82,7 @@ lare_path_transformer_heads: 4
 lare_path_transformer_depth: 2
 lare_path_buffer_capacity: 1024       # MARL4DRP の単一メモリ運用 (use_separete_memory=False) に整合
 lare_path_min_buffer: 256
-lare_path_update_freq: 3
+lare_path_update_freq: 128          # MARL4DRP 整合: 128 ep ごとに評価期間トリガ. その期間中 train_epochs (= dataclass で 50) 個の連続 ep で 1 step ずつ更新
 lare_path_batch_size: 256             # MARL4DRP の `rewardbatch_size=256` に整合. 小さい batch だと loss が大きく振動して proxy 報酬が QMIX に悪影響を与える
 lare_path_lr: 0.0005
 lare_path_save_freq_steps: 500000   # 累積環境ステップ 0.5M ごとに 1 回保存 (= 学習頻度とは独立)
@@ -94,7 +94,7 @@ lare_task_decoder_hidden_dim: 64
 lare_task_decoder_n_layers: 2
 lare_task_buffer_capacity: 1024       # Path 側と同じ理由 (MARL4DRP に整合)
 lare_task_min_buffer: 256
-lare_task_update_freq: 3
+lare_task_update_freq: 128          # MARL4DRP 整合 (Path 側と対称)
 lare_task_batch_size: 256             # Path 側と同じ理由 (MARL4DRP に整合)
 lare_task_lr: 0.0005
 lare_task_save_freq_steps: 500000   # 0.5M ごとに保存 (= Path 側と同じ)

@@ -41,7 +41,10 @@ class LaReTaskConfig:
     update_freq: int = 16
     batch_size: int = 32
     learning_rate: float = 5e-4
-    train_epochs: int = 1
+    # MARL4DRP の evaluation_period 方式に整合 (Path 側と対称).
+    # update_freq ごとに評価期間を発火し、train_epochs 個の連続エピソード末尾で
+    # fresh batch を 1 step ずつ流す.
+    train_epochs: int = 50
     use_lare_training: bool = True
     frozen: bool = False
     autosave_path: Optional[object] = None  # str or zero-arg callable
@@ -81,6 +84,10 @@ class LaReTaskModule:
         # save_freq_steps の throttle 用. 0 で初期化 → 最初の保存は
         # save_freq_steps を超えた時点. 0 step ではセーブしない.
         self._last_saved_step = 0
+
+        # MARL4DRP の evaluation_period 状態機械 (Path 側と対称).
+        self._evaluation_active = False
+        self._evaluation_count = 0
 
         # Per-step bookkeeping (filled by record_step_assignments).
         self._last_step_proxy = 0.0
@@ -161,11 +168,22 @@ class LaReTaskModule:
 
         if self.frozen:
             return
-        if (
-            len(self.buffer) >= self.cfg.min_buffer
-            and self.episode_count % max(1, self.cfg.update_freq) == 0
-        ):
+
+        # MARL4DRP の評価期間方式 (Path 側と対称).
+        if not self._evaluation_active:
+            if (
+                len(self.buffer) >= self.cfg.min_buffer
+                and self.episode_count % max(1, self.cfg.update_freq) == 0
+            ):
+                self._evaluation_active = True
+                self._evaluation_count = 0
+
+        if self._evaluation_active:
             self._update()
+            self._evaluation_count += 1
+            if self._evaluation_count >= max(1, self.cfg.train_epochs):
+                self._evaluation_active = False
+                self._evaluation_count = 0
 
     # -------------------- training --------------------
 
@@ -184,15 +202,16 @@ class LaReTaskModule:
         idx = torch.arange(max_k, device=self.device)[None, :]
         mask = (idx < ks[:, None]).float()
 
-        for _ in range(max(1, self.cfg.train_epochs)):
-            self.decoder.train()
-            r_hat = self.decoder(factors).squeeze(-1)  # (b, max_k)
-            r_hat_masked = r_hat * mask
-            pred_return = r_hat_masked.sum(dim=1)
-            loss = self.loss_fn(pred_return, returns)
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+        # 1 batch sample + 1 optimizer step. 連続更新は end_episode 側の
+        # 評価期間ループが管理する (train_epochs ep で本関数が連続呼出).
+        self.decoder.train()
+        r_hat = self.decoder(factors).squeeze(-1)  # (b, max_k)
+        r_hat_masked = r_hat * mask
+        pred_return = r_hat_masked.sum(dim=1)
+        loss = self.loss_fn(pred_return, returns)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
 
         self.is_trained = True
         self.update_count += 1
