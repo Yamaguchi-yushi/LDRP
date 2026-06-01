@@ -983,7 +983,6 @@ class DrpEnv(gym.Env):
 
 				if self.use_lare_path_training and self.lare_path_module.is_trained:
 					proxy = self.lare_path_module.proxy_rewards(factors)
-					print(f"[LaRe-Path] step {self.step_account} proxy reward: {proxy}")
 					if proxy is not None:
 						ri_array = [float(x) for x in proxy]
 			except Exception as e:
