@@ -288,8 +288,8 @@ class DrpEnv(gym.Env):
 		steps = self._lare_get_steps_str()
 		if self.use_finetuning_lare_path and self.finetuning_lare_path_model_name:
 			source = self._lare_get_source_base_name()
-			return f"FT_{safe_seg}{source}_{map_name}_{agents}agents_{steps}_{suffix}.pth"
-		return f"{safe_seg}{algo}_PATH_{map_name}_{agents}agents_{steps}_{suffix}.pth"
+			return f"FT_{source}_{safe_seg}{map_name}_{agents}agents_{steps}_{suffix}.pth"
+		return f"{algo}_PATH_{safe_seg}{map_name}_{agents}agents_{steps}_{suffix}.pth"
 
 	def _lare_resolve_autosave_path(self):
 		"""Decide the autosave path for the current run.
@@ -348,8 +348,8 @@ class DrpEnv(gym.Env):
 		steps = self._lare_get_steps_str()
 		if self.use_finetuning_lare_task and self.finetuning_lare_task_model_name:
 			source = self._lare_task_get_source_base_name()
-			return f"FT_{safe_seg}{source}_{map_name}_{agents}agents_{steps}_{suffix}.pth"
-		return f"{safe_seg}{algo}_TASK_{map_name}_{agents}agents_{steps}_{suffix}.pth"
+			return f"FT_{source}_{safe_seg}{map_name}_{agents}agents_{steps}_{suffix}.pth"
+		return f"{algo}_TASK_{safe_seg}{map_name}_{agents}agents_{steps}_{suffix}.pth"
 
 	def _lare_task_resolve_autosave_path(self):
 		if self.lare_task_autosave_path:
