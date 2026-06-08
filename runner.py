@@ -206,12 +206,12 @@ class Runner():
         #print("衝突なし:",np.mean(full_completion),len(full_completion))
         #print(non_lock_completion)
         #print("ロックなし", np.mean(non_lock_completion), len(non_lock_completion))
-        #print("Total test episodes:", len(self.info_buffer))
-        #print("Average steps:", np.mean(steps))
+        print("Total test episodes:", len(self.info_buffer))
+        print("Average steps:", np.mean(steps))
         print("Average task completion:", np.mean(task_completion))
-        #print("最高値:",np.max(task_completion))
-        #print("最低値:",np.min(task_completion))
-        #print("実行時間:", np.sum(times), "秒")
+        print("最高値:",np.max(task_completion))
+        print("最低値:",np.min(task_completion))
+        print("実行時間:", np.sum(times), "秒")
         print("平均実行時間:", np.mean(times), "秒")
 
         return
