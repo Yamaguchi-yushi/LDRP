@@ -39,7 +39,7 @@ class DrpEnv(gym.Env):
 			lare_path_batch_size=256,
 			lare_path_lr=5e-4,
 			use_pretrained_lare_path=True,
-			pretrained_lare_path_model_name="QMIX_LARE_map_8x5_2agents_1.2M_final.pth",
+			pretrained_lare_path_model_name="Safe_QMIX_PATH_map_8x5_2agents_6.7M_checkpoint.pth",
 			use_finetuning_lare_path=False,
 			finetuning_lare_path_model_name="QMIX_LARE_map_8x5_2agents_1.2M_final.pth",
 			lare_path_autosave=True,
@@ -194,6 +194,8 @@ class DrpEnv(gym.Env):
 				batch_size=lare_path_batch_size,
 				learning_rate=lare_path_lr,
 			)
+		else:
+			print("⚪ [LaRe-Path] Disabled - using env reward (baseline)")
 
 		if self.use_lare_task:
 			self._init_lare_task(
@@ -206,6 +208,11 @@ class DrpEnv(gym.Env):
 				batch_size=lare_task_batch_size,
 				learning_rate=lare_task_lr,
 			)
+		else:
+			print("⚪ [LaRe-Task] Disabled - using env reward (baseline)")
+
+		# どの報酬モードで動いているかを1行で明示 (NoLaRe / Scratch / Pretrained / Finetuning)
+		self._print_reward_mode_banner()
 
 		#for rendering
 		#if self.is_tasklist:
@@ -338,7 +345,7 @@ class DrpEnv(gym.Env):
 		"""Filename for LaRe-Task models. TASK token + folder separation distinguishes from path models.
 
 		Scratch:    "{Safe_}{ALGO}_TASK_{map}_{N}agents_{S}M_{suffix}.pth"
-		Finetuning: "FT_{Safe_}{source_base}_{map}_{N}agents_{S}M_{suffix}.pth"
+		Finetuning: "FT_{source_base}_{Safe_}{map}_{N}agents_{S}M_{suffix}.pth"
 		"""
 		safe = self._lare_get_safe_prefix()
 		safe_seg = f"{safe}_" if safe else ""
@@ -358,6 +365,35 @@ class DrpEnv(gym.Env):
 			fname = self._lare_task_build_save_filename("checkpoint")
 			return os.path.join(self._lare_task_default_save_dir(), fname)
 		return None
+
+	def _reward_mode_label(self, system):
+		"""報酬モードの実態を絵文字付き1語で返す: NoLaRe / Scratch / Pretrained / Finetuning."""
+		if system == "path":
+			use, module = self.use_lare_path, self.lare_path_module
+			pre = self.use_pretrained_lare_path and self.pretrained_lare_path_model_name
+			fin = self.use_finetuning_lare_path and self.finetuning_lare_path_model_name
+			training = self.use_lare_path_training
+		else:
+			use, module = self.use_lare_task, self.lare_task_module
+			pre = self.use_pretrained_lare_task and self.pretrained_lare_task_model_name
+			fin = self.use_finetuning_lare_task and self.finetuning_lare_task_model_name
+			training = self.use_lare_task_training
+
+		if not use or module is None:
+			return "⚪ NoLaRe (env reward)"
+		if pre:
+			return "🧊 Pretrained (frozen / inference)"
+		if fin:
+			return "🔧 Finetuning (load + train)"
+		return f"🌱 Scratch (online train, training={training})"
+
+	def _print_reward_mode_banner(self):
+		"""env 初期化完了時に, Path/Task 両システムの報酬モードを絵文字付きで1行表示."""
+		print(
+			"🎯 [REWARD MODE]  "
+			f"Path: {self._reward_mode_label('path')}   |   "
+			f"Task: {self._reward_mode_label('task')}"
+		)
 
 	def _init_lare_path(self, factor_dim, decoder_hidden_dim, decoder_n_layers,
 						use_transformer, transformer_heads, transformer_depth,
@@ -420,7 +456,7 @@ class DrpEnv(gym.Env):
 				self._load_lare_path_weights(self.finetuning_lare_path_model_name, freeze=False, label="FINETUNE")
 			else:
 				print(
-					f"[LaRe-Path] Initialized (mode=scratch, training={self.use_lare_path_training}, "
+					f"🌱 [LaRe-Path] Scratch (online train, training={self.use_lare_path_training}, "
 					f"factors={factor_dim})"
 				)
 		except Exception as e:
@@ -454,15 +490,16 @@ class DrpEnv(gym.Env):
 				f"  指定: pretrained_lare_path_model_name = '{model_name}'\n"
 				f"  → ファイル名のタイポ, または models/ への配置忘れがないか確認."
 			)
-			print(msg)
+			print("⚠️ " + msg)
 			raise FileNotFoundError(msg)
 
 		try:
 			self.lare_path_module.load_model(resolved, freeze=freeze)
+			emoji = "🧊" if freeze else "🔧"
 			mode = "frozen (inference only)" if freeze else "trainable (finetuning)"
-			print(f"[LaRe-Path][{label}] Loaded {resolved} - {mode}")
+			print(f"{emoji} [LaRe-Path][{label}] Loaded {resolved} - {mode}")
 		except Exception as e:
-			print(f"[LaRe-Path][{label}] Load failed ({e}); falling back to scratch.")
+			print(f"⚠️ [LaRe-Path][{label}] Load failed ({e}); falling back to scratch.")
 
 	# ---------------- LaRe-Task initialisation / weight-loading ----------------
 	def _init_lare_task(self, factor_dim, decoder_hidden_dim, decoder_n_layers,
@@ -516,7 +553,7 @@ class DrpEnv(gym.Env):
 				self._load_lare_task_weights(self.finetuning_lare_task_model_name, freeze=False, label="FINETUNE")
 			else:
 				print(
-					f"[LaRe-Task] Initialized (mode=scratch, training={self.use_lare_task_training}, "
+					f"🌱 [LaRe-Task] Scratch (online train, training={self.use_lare_task_training}, "
 					f"factors={factor_dim})"
 				)
 		except Exception as e:
@@ -540,15 +577,16 @@ class DrpEnv(gym.Env):
 				f"  指定: pretrained_lare_task_model_name = '{model_name}'\n"
 				f"  → ファイル名のタイポ, または models/ への配置忘れがないか確認."
 			)
-			print(msg)
+			print("⚠️ " + msg)
 			raise FileNotFoundError(msg)
 
 		try:
 			self.lare_task_module.load_model(resolved, freeze=freeze)
+			emoji = "🧊" if freeze else "🔧"
 			mode = "frozen (inference only)" if freeze else "trainable (finetuning)"
-			print(f"[LaRe-Task][{label}] Loaded {resolved} - {mode}")
+			print(f"{emoji} [LaRe-Task][{label}] Loaded {resolved} - {mode}")
 		except Exception as e:
-			print(f"[LaRe-Task][{label}] Load failed ({e}); falling back to scratch.")
+			print(f"⚠️ [LaRe-Task][{label}] Load failed ({e}); falling back to scratch.")
 
 	def _lare_compute_colliding_pairs(self, obs_prepare):
 		"""Mirror MARL4DRP.get_collision_agents() — returns list of pairs [[i, j], ...]."""
