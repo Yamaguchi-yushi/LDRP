@@ -368,6 +368,12 @@ class AllocationCritic(nn.Module):
         ...
 ```
 
+#### 実装上の制約 (将来の動的エージェント数拡張のため): per-agentトークン方式を維持する
+
+`AllocationCritic` は **各エージェント/サブタスクをトークンとして attention に渡し、集約は attention 側に任せる**設計を維持すること。[modules/critics/mat.py:43](../src/epymarl/src/modules/critics/mat.py#L43) の `MATCritic` のように「他の全エージェントの行動を1本のベクトルに連結してから入力する」方式は避ける。
+
+理由: 連結方式は入力次元に `n_agents` が literal に埋め込まれる (`input_shape += n_actions * self.n_agents`, [mat.py:80](../src/epymarl/src/modules/critics/mat.py#L80))。この場合 `nn.Linear` の重み行列自体が `n_agents` 依存になり、[dynamic_agent_count.md](dynamic_agent_count.md) の N_max + アクティブフラグ方式 (入力次元は固定したまま、非アクティブ分をマスクで無効化する) を適用できなくなる。per-agentトークン方式であれば、重み行列は要素数 (集合のサイズ) に依存しないので、`subtask_mask` と対称な `agent_mask` を追加するだけで動的エージェント数に対応できる。
+
 ### 6.3 Allocator モジュール
 
 **ファイル**: `src/alma/allocator/module.py`
