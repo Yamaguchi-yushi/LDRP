@@ -21,3 +21,4 @@ src/lare/task/checkpoints/
 # 旧パス saved_models/ も後方互換のためサポートしているが git 管理外
 src/lare/path/saved_models/
 src/lare/task/saved_models/
+CLAUDE.md
