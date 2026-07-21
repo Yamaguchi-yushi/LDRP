@@ -14,8 +14,9 @@ agent_num = [
     #3,
     #4,
     #5,
-    7,
-    10,
+    #7,
+    8,
+    #10,
 ]
 
 path_planner = [
@@ -26,8 +27,13 @@ path_planner = [
     #"qplex",
     #"happo",
     #"mat",
-    #"mat_dec",
-    "pbs",
+    "mat_dec",
+    #"pbs",
+]
+
+task_assigner = [
+    "fifo",
+    "tp",
 ]
 
 method_tag = [
@@ -36,18 +42,21 @@ method_tag = [
     #"ours",
 ]
 
-task_assigner = [
-    "fifo",
-    "tp",
+mat_model_agent_num = [     # mat_decのモデルを学習した際のエージェント数を指定する．
+    "",
+    "4",
+    "8",
 ]
+
 #"""
 command = [
-    [sys.executable, "-u", "test.py", str(i), str(j), str(k), str(l), str(m)]
+    [sys.executable, "-u", "test.py", str(i), str(j), str(k), str(l), str(m), str(n)]
     for i in map_name
     for j in agent_num
     for k in path_planner
     for l in task_assigner
     for m in method_tag
+    for n in mat_model_agent_num
 ]
 """
 command = [
@@ -65,10 +74,12 @@ running_processes = []
 
 #logファイルのパス変更ver
 for cmd in command:
-    log_dir = "logs/" + str(cmd[2]) + "/safe"
+    log_dir = "logs/" + str(cmd[3]) + "/safe"
     os.makedirs(log_dir, exist_ok=True)
-    method_suffix = f"_{cmd[6]}" if len(cmd) > 6 and cmd[6] else ""
-    with open(log_dir + "/" + str(cmd[2]) + "_" + str(cmd[3]) + "_" + str(cmd[4]) + "_" + str(cmd[5]) + method_suffix + ".txt", "w") as f:
+    method_suffix = f"_{cmd[7]}" if len(cmd) > 7 and cmd[7] else ""
+    train_n = cmd[8] if len(cmd) > 8 and cmd[8] else cmd[4]
+    log_name = f"{cmd[3]}_{cmd[4]}_{cmd[5]}_{cmd[6]}{method_suffix}_{train_n}.txt"
+    with open(os.path.join(log_dir, log_name), "w") as f:
         proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
     running_processes.append((proc ,cmd))
     print("Started:", cmd, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))

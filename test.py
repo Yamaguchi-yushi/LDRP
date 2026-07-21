@@ -23,13 +23,15 @@ if __name__ == "__main__":
     config = Namespace(**config_dict)
 
     if len(sys.argv) > 1:
-        #map,agent,path,task,[method_tag]
+        #map,agent,path,task,[method_tag],[mat_model_agent_num]
         config.map_name = sys.argv[1]
         config.agent_num = int(sys.argv[2])
         config.path_planner = sys.argv[3]
         config.task_assigner = sys.argv[4]
         if len(sys.argv) > 5:
             config.method_tag = sys.argv[5]
+        if len(sys.argv) > 6 and sys.argv[6] != "":
+            config.mat_model_agent_num = int(sys.argv[6])
 
     env_name = "drp_env:drp_safe-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
     #env_name = "drp_env:drp_safe-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"

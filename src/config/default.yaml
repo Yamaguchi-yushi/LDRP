@@ -10,10 +10,11 @@ map_name: "map_8x5"
 task_assigner: "tp"
 path_planner: "qmix"
 method_tag: ""
+mat_model_agent_num: null
 
 # --- 実行制御 ---
 time_limit: 1000
-test_num: 1000
+test_num: 10
 # タスク割当の選択肢・結果を stdout に出力 (実際に何かを割当てたステップだけ)
 debug_task_assign: False
 # PPO タスク割当の学習打ち切りステップ数 (累積環境ステップ).
