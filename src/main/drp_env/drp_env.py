@@ -71,6 +71,7 @@ class DrpEnv(gym.Env):
 			# (PBS の path 計画で必要). False にすると SafeEnv の保護が待機 agent
 			# にも効く. デフォルト False = 安全制御優先 (詳細は CLAUDE.md).
 			pbs_mode=False,
+			allow_reassign_before_pickup=False,
 		  ):
 		self.agent_num = agent_num
 		self.n_agents = agent_num # for epymarl
@@ -132,6 +133,8 @@ class DrpEnv(gym.Env):
 		self.assigned_list=[]#未実行のタスクとエージェントの割り当て表
 		self.task_num = self.agent_num*2 # for tasklist, each agent can have 2 tasks at most
 		self.alltasks = task_list
+		self.allow_reassign_before_pickup = allow_reassign_before_pickup
+		self._reassign_event = False
 
 		if self.is_tasklist:
 			self.ee_env.task_flag_on()
@@ -666,6 +669,7 @@ class DrpEnv(gym.Env):
 			self.assigned_tasks=[[] for _ in range(self.agent_num)]
 			# LaRe-Task: per-task creation step (parallel to current_tasklist).
 			self._lare_task_creation_steps = []
+			self._reassign_event = False
 			if self.alltasks is None:
 				self.alltasks = self.ee_env.create_tasklist(self.time_limit, self.agent_num, 1)
 
@@ -697,6 +701,26 @@ class DrpEnv(gym.Env):
 		obs = self.obs_manager.calc_obs()
 
 		return obs
+	
+	def reset_prepick_assignments(self):
+		"""Wipe pre-pickup task assignments on an event so they can be re-matched.
+		Called by the runner before assign_task. No-op when the flag is OFF or no event fired.
+		Agents that have already picked up (en route to dropoff) and their tasks are preserved."""
+		if not self.allow_reassign_before_pickup:
+			return
+		if not self._reassign_event:
+			return
+		self._reassign_event = False
+		# assigned_list holds only pre-pickup tasks (picked ones are already popped),
+		# so resetting every entry to -1 is safe.
+		for j in range(len(self.assigned_list)):
+			self.assigned_list[j] = -1
+		# Make pre-pickup agents (heading to the pickup node) idle so the external
+		# policy re-includes them as reassignment candidates.
+		# Picked-up agents (goal == task[1], heading to dropoff) are left untouched = locked.
+		for i in range(self.agent_num):
+			if self.assigned_tasks[i] != [] and self.goal_array[i] == self.assigned_tasks[i][0]:
+				self.assigned_tasks[i] = []
 
 
 	def _default_task_assign_tp(self):
@@ -741,6 +765,7 @@ class DrpEnv(gym.Env):
 		# task system is active, use the built-in TP assigner so MARL training
 		# can run with task_flag=True without an external task policy.
 		if self.is_tasklist and task_assign is None:
+			self.reset_prepick_assignments()
 			task_assign = self._default_task_assign_tp()
 
 		# LaRe-Path: snapshot per-agent onehot positions BEFORE movement.
@@ -917,6 +942,7 @@ class DrpEnv(gym.Env):
 						if self.goal_array[i] == self.assigned_tasks[i][1]:
 							self.assigned_tasks[i] = [] # remove the task from assigned_tasks
 							self.task_completion += 1
+							self._reassign_event = True
 
 			# assign tasks to agents — capture pre-assignment state for LaRe-Task.
 			lare_task_decisions = []

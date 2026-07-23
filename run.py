@@ -11,23 +11,30 @@ map_name = [
 ]
 
 agent_num = [
-    #3,
-    #4,
-    #5,
-    #7,
-    8,
-    #10,
+    # 3,
+    # 4,
+    # 5,
+    # 6,
+    # 7,
+    # 9,
+    # 8,
+     10,
+    # 11,
+    # 12,
+    # 13,
+    # 14,
+    # 15,
 ]
 
 path_planner = [
     #"iql",
     #"qmix",
     #"vdn",
-    #"mappo",
+    "mappo",
     #"qplex",
     #"happo",
     #"mat",
-    "mat_dec",
+    #"mat_dec",
     #"pbs",
 ]
 
@@ -37,26 +44,34 @@ task_assigner = [
 ]
 
 method_tag = [
-    "",
-    #"safe",
+    #"",
+    "safe",
     #"ours",
+]
+
+reassign_before_pickup = [
+    "base",
+    #"reassign",
 ]
 
 mat_model_agent_num = [     # mat_decのモデルを学習した際のエージェント数を指定する．
     "",
-    "4",
-    "8",
+    #"4",
+    #7,
+    #"8",
+    # 10,
 ]
 
 #"""
 command = [
-    [sys.executable, "-u", "test.py", str(i), str(j), str(k), str(l), str(m), str(n)]
+    [sys.executable, "-u", "test.py", str(i), str(j), str(k), str(l), str(m), str(n), str(o)]
     for i in map_name
     for j in agent_num
     for k in path_planner
     for l in task_assigner
     for m in method_tag
-    for n in mat_model_agent_num
+    for n in reassign_before_pickup
+    for o in mat_model_agent_num
 ]
 """
 command = [
@@ -74,11 +89,12 @@ running_processes = []
 
 #logファイルのパス変更ver
 for cmd in command:
-    log_dir = "logs/" + str(cmd[3]) + "/safe"
+    log_dir = "logs/" + str(cmd[3]) + "/safe" + "/" + str(cmd[5]) + "/" + str(cmd[4]) + "agent"
     os.makedirs(log_dir, exist_ok=True)
     method_suffix = f"_{cmd[7]}" if len(cmd) > 7 and cmd[7] else ""
-    train_n = cmd[8] if len(cmd) > 8 and cmd[8] else cmd[4]
-    log_name = f"{cmd[3]}_{cmd[4]}_{cmd[5]}_{cmd[6]}{method_suffix}_{train_n}.txt"
+    reassign_suffix = f"_{cmd[8]}" if len(cmd) > 8 and cmd[8] else ""
+    train_n = cmd[9] if len(cmd) > 9 and cmd[9] else cmd[4]
+    log_name = f"{cmd[3]}_{cmd[4]}_{cmd[5]}_{cmd[6]}{method_suffix}{reassign_suffix}_{train_n}.txt"
     with open(os.path.join(log_dir, log_name), "w") as f:
         proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT)
     running_processes.append((proc ,cmd))
