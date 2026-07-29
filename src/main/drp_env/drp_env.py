@@ -136,7 +136,7 @@ class DrpEnv(gym.Env):
 		self.current_tasklist=[]
 		self.assigned_tasks=[]#エージェントが割り当てられたタスク(未ピックを含む)
 		self.assigned_list=[]#未実行のタスクとエージェントの割り当て表
-		self.task_num = self.agent_num*2 # for tasklist, each agent can have 2 tasks at most
+		self.task_num = 10 # for tasklist, each agent can have 2 tasks at most
 		self.alltasks = task_list
 		self._auto_tasks = (task_list is None)	# task_list　未指定の場合毎回再生成
 		self.allow_reassign_before_pickup = allow_reassign_before_pickup
