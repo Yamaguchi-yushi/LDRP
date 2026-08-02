@@ -19,6 +19,14 @@ UNREAL_MAP = [
     "map_10x10",
     "map_aoba00",
     "map_aoba01",
+    # 以下は元々緯度経度だったが node.csv をメートル換算 + 原点シフト済み。
+    # 元の緯度経度は各マップの node_original.csv に保存してある。
+    # 既にメートル単位なので ×1e5 は不要 → こちら側に置く。
+    "map_kyodai",
+    "map_osaka",
+    "map_paris",
+    "map_shibuya",
+    "map_shijo",
 ]
 
 class MapMake():
@@ -260,7 +268,7 @@ class MapMake():
 
 		return action_set
 
-	def collision_detect(self, obs_prepare):
+	def collision_detect(self, obs_prepare, colli_distan=5):
 		collision_flag = 0
 		for i in range(self.agent_num-1):
 			pos_i = [obs_prepare[i][0], obs_prepare[i][1]]
@@ -271,7 +279,7 @@ class MapMake():
 				distance_ij = math.dist(pos_i, pos_j) 
 				#print( "distance i j",distance_ij)
 
-				if distance_ij<5:
+				if distance_ij<colli_distan:
 					collision_flag = 1
 					#print(pos_i, pos_j)
 					print('!!!collision!!! with agent',i,j)
