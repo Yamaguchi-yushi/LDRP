@@ -708,6 +708,8 @@ class DrpEnv(gym.Env):
 		# for tasklist
 		self.task_completion = 0
 		#print('Environment reset obs: \n', self.obs)
+		# 正規化したtask_completionを計算するため
+		self.active_agent_steps = 0
 
 		obs = self.obs_manager.calc_obs()
 
@@ -791,6 +793,7 @@ class DrpEnv(gym.Env):
 
 		#transite env based on joint_action
 		self.step_account += 1
+		self.active_agent_steps += int(sum(getattr(self, "active", [True] * self.agent_num)))  # for task_completion normalization	
 		self.obs_current_chache = copy.deepcopy(self.obs)
 
 		self.obs_prepare = []
@@ -891,6 +894,8 @@ class DrpEnv(gym.Env):
 			"goal_account": self.reach_account,
 			"1agent_goal_account": self.reach_account/self.agent_num,
 			"task_completion": self.task_completion,
+			"n_active_mean": self.active_agent_steps / max(1, self.step_account), # エージェント数の推移
+			"task_completion_per_agent": self.task_completion / max(1e-8, self.active_agent_steps / max(1, self.step_account)), # 正規化したタスク完了率
 		}
 		# happen
 		if collision_flag==1:#collision
