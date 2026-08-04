@@ -710,6 +710,9 @@ class DrpEnv(gym.Env):
 		#print('Environment reset obs: \n', self.obs)
 		# 正規化したtask_completionを計算するため
 		self.active_agent_steps = 0
+		# 稼働状況を可視化
+		self.busy_agent_steps = 0
+		self.deadhead_agent_steps = 0
 
 		obs = self.obs_manager.calc_obs()
 
@@ -763,6 +766,30 @@ class DrpEnv(gym.Env):
 					task_assign[i] = best
 		return task_assign
 
+	def _accumulate_utilization(self):
+		"""稼働状態を 1 ステップ分カウントする.
+
+		idle     : assigned_tasks[i] == []                     (タスク無し)
+		deadhead : タスク有り かつ ピック地点へ向かっている    (空車回送 = 割当が生んだ無駄)
+		loaded   : タスク有り かつ ドロップ地点へ向かっている  (積載中 = 不可避な仕事)
+		busy = deadhead + loaded.
+
+		active フラグ未実装の間は全機アクティブ扱い. Phase A で active を
+		導入したら本メソッドを書き換えずに正しい値へ切り替わる.
+		"""
+		active = getattr(self, "active", [True] * self.agent_num)
+		for i in range(self.agent_num):
+			if not active[i]:
+				continue
+			task = self.assigned_tasks[i]
+			if not task:
+				continue
+			self.busy_agent_steps += 1
+			if self.goal_array[i] == task[0]:	# goal == pickup node => deadhead
+				self.deadhead_agent_steps += 1
+
+
+
 	def step(self, joint_action):
 
 		#print("tasks",self.current_tasklist)
@@ -794,6 +821,7 @@ class DrpEnv(gym.Env):
 		#transite env based on joint_action
 		self.step_account += 1
 		self.active_agent_steps += int(sum(getattr(self, "active", [True] * self.agent_num)))  # for task_completion normalization	
+		self._accumulate_utilization()  # for busy/deadhead stats
 		self.obs_current_chache = copy.deepcopy(self.obs)
 
 		self.obs_prepare = []
@@ -896,6 +924,10 @@ class DrpEnv(gym.Env):
 			"task_completion": self.task_completion,
 			"n_active_mean": self.active_agent_steps / max(1, self.step_account), # エージェント数の推移
 			"task_completion_per_agent": self.task_completion / max(1e-8, self.active_agent_steps / max(1, self.step_account)), # 正規化したタスク完了率
+			"busy_ratio": self.busy_agent_steps / max(1, self.active_agent_steps), # 稼働率
+			"deadhead_ratio": self.deadhead_agent_steps / max(1, self.busy_agent_steps), # 空車回送率
+			"deadhead_steps_per_task": self.deadhead_agent_steps / max(1, self.task_completion), # タスクあたりの空車回送ステップ数
+			"agent_steps_per_task": self.busy_agent_steps / max(1, self.task_completion), # タスクあたりの稼働ステップ数
 		}
 		# happen
 		if collision_flag==1:#collision

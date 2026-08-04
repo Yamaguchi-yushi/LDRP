@@ -202,6 +202,9 @@ class Runner():
         task_completion = [info["task_completion"] for info in self.info_buffer]
         per_agent = [info["task_completion_per_agent"] for info in self.info_buffer]
         n_active = [info["n_active_mean"] for info in self.info_buffer]
+        busy = [info["busy_ratio"] for info in self.info_buffer]
+        deadhead_per_task = [info["deadhead_steps_per_task"] for info in self.info_buffer]
+        steps_per_task = [info["agent_steps_per_task"] for info in self.info_buffer]
         full_completion = [info["task_completion"] for info in self.info_buffer if not info["collision"]]
         non_lock_completion = [info["task_completion"] for idx, info in enumerate(self.info_buffer) if tmp_list[idx]==False]
         total = len(self.info_buffer)
@@ -220,6 +223,12 @@ class Runner():
         print(f"衝突なし平均配送             ({len(full_completion)} ep): {non_collision_mean:.2f}")
         print(f"最高値: {np.max(task_completion)}")
         print(f"最低値: {np.min(task_completion)}")
+
+        print("--- エージェント稼働 ---")
+        print(f"稼働率 (タスク保持):      {np.mean(busy)*100:.1f} %")
+        print(f"アイドル率:               {(1 - np.mean(busy))*100:.1f} %")
+        print(f"1タスクあたり空走step:    {np.mean(deadhead_per_task):.2f}")
+        print(f"1タスクあたり占有step:    {np.mean(steps_per_task):.2f}")
 
         print("--- エピソード終了理由 ---")
         print(f"衝突終了: {collision_count}/{total} ({collision_rate*100:.1f}%)")
