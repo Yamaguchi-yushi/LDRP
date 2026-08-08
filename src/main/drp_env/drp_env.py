@@ -713,6 +713,12 @@ class DrpEnv(gym.Env):
 		# 稼働状況を可視化
 		self.busy_agent_steps = 0
 		self.deadhead_agent_steps = 0
+		# タスク到着，タスク停滞の監視
+		self.task_arrival_count = 0
+		self.task_dropped_count = 0
+		self.pending_len_sum = 0
+		self.pending_len_max = 0
+		self.unassigned_len_sum = 0
 
 		obs = self.obs_manager.calc_obs()
 
@@ -981,6 +987,9 @@ class DrpEnv(gym.Env):
 					self.assigned_list.append(-1) # -1 means unassigned
 					# LaRe-Task: track creation step parallel to current_tasklist.
 					self._lare_task_creation_steps.append(self.step_account)
+					self.task_arrival_count += 1
+				else:
+					self.task_dropped_count += 1
 
 			# remove the task from the list if it has been completed
 			for i in range(self.agent_num):
@@ -1095,6 +1104,21 @@ class DrpEnv(gym.Env):
 
 		info["distance_from_start"] = self.distance_from_start
 
+		if self.is_tasklist:
+			pending = len(self.current_tasklist)
+			unassigned = sum(1 for v in self.assigned_list if v == -1)
+			self.pending_len_sum += pending
+			self.pending_len_max = max(self.pending_len_max, pending)
+			self.unassigned_len_sum += unassigned
+			steps = max(1, self.step_account)
+
+			info["task_arrival"] = self.task_arrival_count
+			info["task_dropped"] = self.task_dropped_count
+			info["pending_len_avg"] = self.pending_len_sum / steps
+			info["pending_len_max"] = self.pending_len_max
+			info["unassigned_len_avg"] = self.unassigned_len_sum / steps
+			info["unassigned_len_final"] = unassigned
+			
 		# LaRe-Path: compute factors, record the step, and (if trained + enabled) swap rewards.
 		if self.use_lare_path and self.lare_path_module is not None:
 			try:
