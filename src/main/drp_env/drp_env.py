@@ -77,6 +77,25 @@ class DrpEnv(gym.Env):
 			task_p_high = 0.8,
 			task_p_low = 0.1,
 			task_switch_prob = 0.01,
+			# --- 到着プロセスのエピソード毎ランダム化 (既定 False = 従来動作) ---
+			# True にすると reset() ごとに bernoulli(p ランダム) / mmpp を引き直す.
+			# 学習時に使う (1 方策を全シナリオで評価するため). 評価時は False.
+			randomize_task_arrival = False,
+			mmpp_ratio = 0.5,			# MMPP を引く確率 (残りが bernoulli). MMPP 内部の
+										# パラメータは固定 (相転換が ~5 回/ep しかなく,
+										# switch_prob まで振ると分散が跳ねるため)
+			# 全マップ共通の範囲. 1 タスクの所要ステップがマップで 3.2 倍違うため
+			# 同じ p でも実効負荷は変わるが, この範囲ならどのマップも疎〜密を経験する.
+			#   map_8x5   (32.1 step/タスク): 0.32 〜 3.21 件/サイクル
+			#   map_aoba00(103.0 step/タスク): 1.03 〜 10.3 件/サイクル
+			# 上限 0.10 は最小マップでも密に届く値, 下限 0.01 は最大マップでも
+			# 過剰配備が明確になる値 (実測: aoba00 の p=0.01 で idle 57%).
+			rand_p_min = 0.01,			# bernoulli p の下限
+			rand_p_max = 0.10,			# bernoulli p の上限
+			# --- 評価用: エピソード k の乱数を (base + k) で固定 ---
+			# 条件間でタスク列・開始位置を完全に一致させ, ペア比較を可能にする.
+			# None = 従来動作 (グローバル np.random を継続使用).
+			episode_seed_base = None,
 		  ):
 		self.agent_num = agent_num
 		self.n_agents = agent_num # for epymarl
@@ -146,6 +165,13 @@ class DrpEnv(gym.Env):
 		self.task_p_high = task_p_high
 		self.task_p_low = task_p_low
 		self.task_switch_prob = task_switch_prob
+		# 到着プロセスのランダム化 (エピソード毎に引き直す. 学習時に使う)
+		self.randomize_task_arrival = bool(randomize_task_arrival)
+		self.mmpp_ratio = float(mmpp_ratio)
+		self.rand_p_min = float(rand_p_min)
+		self.rand_p_max = float(rand_p_max)
+		# 評価用のエピソード単位 seed (None なら従来動作)
+		self.episode_seed_base = episode_seed_base
 		if self.is_tasklist:
 			self.ee_env.task_flag_on()
 
@@ -657,8 +683,45 @@ class DrpEnv(gym.Env):
 			np.random.seed(int(seed))
 		return [seed]
 
+	def _sample_task_arrival(self):
+		"""到着プロセスをエピソード毎に引き直す (randomize_task_arrival=True のときのみ).
+
+		bernoulli : p ~ U(rand_p_min, rand_p_max) を毎エピソード引き直す.
+		mmpp      : task_p_high / task_p_low / task_switch_prob を **上書きしない**.
+		            env_args (train.py / yaml) で設定した値がそのまま使われる.
+		            推奨は学習範囲の両端を往復する設定 (p_high=rand_p_max,
+		            p_low=rand_p_min) で, switch_prob は「1 エピソードあたり
+		            相転換 5 回」= 5 / time_limit.
+
+		            注意: switch_prob=0.01 (相 100 step) は map_aoba00 で約 1
+		            タスクサイクル分しかない. 経路方策は需要を観測しないので
+		            問題ないが, フリート方策の学習と評価では相をもっと長く取る
+		            必要がある (time_limit=3000 なら switch_prob=0.0017 で相
+		            588 step ≒ 5.7 サイクル). 相が短いと台数を変えても効果が
+		            出る前に相が変わり動的制御の価値が消える
+		            (実測: 相 200 step で N=7→10 の差 +1.3, 相 500 step で +7.7).
+
+		乱数は np.random を使う (seed() が np.random をシードするので再現性は保たれる).
+		"""
+		if np.random.random() < self.mmpp_ratio:
+			self.task_arrival = "mmpp"
+			# p_high / p_low / switch_prob は env_args の値をそのまま使う.
+			# ここで上書きすると train.py / yaml から制御できなくなるため.
+		else:
+			self.task_arrival = "bernoulli"
+			self.task_density = float(np.random.uniform(self.rand_p_min, self.rand_p_max))
+
 	def reset(self):
-		# if goal and start are not assigned, randomly generate every episode    
+		# 評価時のペア比較用: エピソード index だけで乱数列を決める.
+		# 条件によって乱数の消費量が違う (衝突による早期終了・割当器の乱数・方策呼出回数)
+		# ため, 何もしないと 2 エピソード目以降でタスク列が条件間でずれる.
+		# ここで打ち直すと開始位置・タスク列・割当器の乱数がすべて episode index だけで
+		# 決まり, 全条件で完全に同一のシナリオになる (aamas_submission.md §5.1 の DiD 用).
+		# episode_account の +1 は下部で行われるので, ここでは前エピソードまでの回数.
+		if self.episode_seed_base is not None:
+			np.random.seed(int(self.episode_seed_base) + int(self.episode_account))
+
+		# if goal and start are not assigned, randomly generate every episode
 		self.start_ori_array = copy.deepcopy(self.ee_env.input_start_ori_array)
 		self.goal_array = copy.deepcopy(self.ee_env.input_goal_array)
 		#print("self.start_ori_array", self.start_ori_array)
@@ -681,6 +744,8 @@ class DrpEnv(gym.Env):
 			self._lare_task_creation_steps = []
 			self._reassign_event = False
 			if self._auto_tasks:
+				if self.randomize_task_arrival:
+					self._sample_task_arrival()
 				self.alltasks = self.ee_env.create_tasklist(self.time_limit, self.agent_num, self.task_density,
 												mode=self.task_arrival, p_high=self.task_p_high, p_low=self.task_p_low, switch_prob=self.task_switch_prob)
 
@@ -718,7 +783,15 @@ class DrpEnv(gym.Env):
 		self.task_dropped_count = 0
 		self.pending_len_sum = 0
 		self.pending_len_max = 0
+		self.saturated_steps = 0		# キューが上限だったステップ数
 		self.unassigned_len_sum = 0
+		# タスクの待ち時間 (発生 -> ピック / 発生 -> 配達完了)
+		self.pickup_wait_sum = 0		# Σ (ピック時刻 - 発生時刻)
+		self.pickup_count = 0
+		self.service_time_sum = 0		# Σ (配達完了時刻 - 発生時刻)
+		self.service_count = 0
+		# ピック時に発生時刻を退避する (current_tasklist から pop されて失われるため)
+		self._agent_task_creation = [None] * self.agent_num
 
 		obs = self.obs_manager.calc_obs()
 
@@ -1000,6 +1073,12 @@ class DrpEnv(gym.Env):
 							self.assigned_tasks[i] = [] # remove the task from assigned_tasks
 							self.task_completion += 1
 							self._reassign_event = True
+							# 配送時間 (発生 -> 配達完了). ピック時に退避した発生時刻を使う.
+							_c = self._agent_task_creation[i]
+							if _c is not None:
+								self.service_time_sum += max(0, self.step_account - _c)
+								self.service_count += 1
+								self._agent_task_creation[i] = None
 
 			# assign tasks to agents — capture pre-assignment state for LaRe-Task.
 			lare_task_decisions = []
@@ -1067,6 +1146,12 @@ class DrpEnv(gym.Env):
 								self.current_tasklist.pop(idx)
 								self.assigned_list.pop(idx)
 								if 0 <= idx < len(self._lare_task_creation_steps):
+									# 待ち時間 (発生 -> ピック). 台数不足だと伸びる.
+									_creation = self._lare_task_creation_steps[idx]
+									self.pickup_wait_sum += max(0, self.step_account - _creation)
+									self.pickup_count += 1
+									# 配達完了までの計測用に発生時刻をエージェント側へ退避
+									self._agent_task_creation[i] = _creation
 									self._lare_task_creation_steps.pop(idx)
 							except ValueError:
 								print("ValueError: agent ", i, " 's assigned task is not in the current_tasklist")
@@ -1109,6 +1194,8 @@ class DrpEnv(gym.Env):
 			unassigned = sum(1 for v in self.assigned_list if v == -1)
 			self.pending_len_sum += pending
 			self.pending_len_max = max(self.pending_len_max, pending)
+			if pending >= self.task_num:
+				self.saturated_steps += 1
 			self.unassigned_len_sum += unassigned
 			steps = max(1, self.step_account)
 
@@ -1118,6 +1205,28 @@ class DrpEnv(gym.Env):
 			info["pending_len_max"] = self.pending_len_max
 			info["unassigned_len_avg"] = self.unassigned_len_sum / steps
 			info["unassigned_len_final"] = unassigned
+			# saturated: キューが上限に達したか (0/1). 平均が飽和エピソードの割合になる.
+			# pending_len_max の平均だけでは「常に 8」と「半分は 10, 半分は 6」を区別できない.
+			info["saturated"] = 1.0 if self.pending_len_max >= self.task_num else 0.0
+			# saturated_ratio: 上限に張り付いていたステップの割合. 二値の saturated だけだと
+			# 「一瞬触れた」と「ずっと満杯」を区別できないため, 程度も出す.
+			info["saturated_ratio"] = self.saturated_steps / max(1, self.step_account)
+			# 待ち時間. pickup は台数不足で伸び, service は経路品質も含む総所要時間.
+			info["pickup_wait_mean"] = self.pickup_wait_sum / max(1, self.pickup_count)
+			info["service_time_mean"] = self.service_time_sum / max(1, self.service_count)
+			# randomize_task_arrival=True のとき, どの設定が引かれたかを記録する.
+			# これが無いと学習ログから訓練分布を検証できない.
+			# arrival_is_mmpp_mean が mmpp_ratio 付近になっていれば抽選が正常.
+			info["arrival_is_mmpp"] = 1.0 if self.task_arrival == "mmpp" else 0.0
+			# 平均到着率. mmpp は対称スイッチなので長期平均が (p_high+p_low)/2.
+			# task_density をそのまま出すと mmpp エピソードで前回値が残り過大に見えるため,
+			# 両分岐を「1 ステップあたりの期待到着数」に揃えて比較可能にする.
+			if self.task_arrival == "mmpp":
+				info["arrival_density"] = float((self.task_p_high + self.task_p_low) / 2.0)
+			elif self.task_arrival == "bernoulli":
+				info["arrival_density"] = float(self.task_density)
+			else:	# "fixed" は毎ステップ 1 件
+				info["arrival_density"] = 1.0
 			
 		# LaRe-Path: compute factors, record the step, and (if trained + enabled) swap rewards.
 		if self.use_lare_path and self.lare_path_module is not None:
