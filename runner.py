@@ -94,6 +94,7 @@ class Runner():
     def run_episode(self):
 
         obs_n = self.env.reset()
+        self.path_planner.reset_hidden()
         done = False
         episode_score = 0
         env_step = 0
