@@ -123,6 +123,16 @@ lare_task_lr: 0.0005
 lare_task_save_freq_steps: 500000   # 0.5M ごとに保存 (= Path 側と同じ)
 lare_task_save_dir: null            # deprecated: 旧 saved_models/ 用 (load の後方互換のみ). 新規 autosave は src/lare/task/checkpoints/ 固定
 
+# --- PPO タスク割り当ての学習　/ 保存
+train_task_assigner: False
+save_ppo_task_model: True
+ppo_task_save_interval: 500000
+ppo_task_checkpoint_path: ""
+ppo_task_load_step: 0
+local_results_path: "results"
+seed: 0
+eval_seed: 0
+
 # =============================================================================
 # 命名規則・参考情報 (読むだけ)
 # =============================================================================

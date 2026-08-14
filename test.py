@@ -7,6 +7,7 @@ import sys
 import numpy as np
 from argparse import Namespace
 import argparse
+import torch
 from runner import Runner
 
 
@@ -40,6 +41,7 @@ if __name__ == "__main__":
 
     env_name = "drp_env:drp_safe-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
     #env_name = "drp_env:drp_safe-" + str(config.agent_num) + "agent_" + config.map_name + "-v2"
+    config.env_name = env_name
 
     # Optionally forward LaRe-Path params from config (no-op when use_lare_path=false).
     lare_path_keys = [
@@ -99,9 +101,18 @@ if __name__ == "__main__":
     pbs_mode = (getattr(config, "path_planner", "") == "pbs")
 
     model_tag = getattr(config, "reassign_before_pickup", "base")
-    for reassign_flag in (False, True):
+
+    training = bool(getattr(config, "train_task_assigner", False))
+    if training and config.task_assigner != "ppo":
+        raise ValueError("train_task_assigner is True but task_assigner is not 'ppo'.")
+    
+    # 今回の論文では再割当を扱わないため, 全条件を「再割当なし」で揃える
+    # (design/next_actions.md §11)。両条件を測りたくなったら下の行に戻す。
+    # for reassign_flag in (False, True): # タスク再割り当てありの方策実行の場合
+    for reassign_flag in (False,):
         print(f"\n########## model={model_tag}  allow_reassign_before_pickup={reassign_flag} ##########", flush=True)
-        np.random.seed(0) #シード値を固定するため　未確認
+        np.random.seed(config.seed if training else config.eval_seed) #シード値を固定するため
+        torch.manual_seed(config.seed)
         env = gym.make(
             env_name,
             state_repre_flag="onehot_fov",
@@ -118,6 +129,6 @@ if __name__ == "__main__":
             config_dict = yaml.safe_load(file)
         config = Namespace(**config_dict)
         """
-        runner = Runner(config, env, reward_list)
+        runner = Runner(config, env, reward_list, training=training)
         runner.run()
         runner.finish()
