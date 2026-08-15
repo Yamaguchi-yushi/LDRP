@@ -81,4 +81,11 @@ class MARLPolicy():
             actions.append(action)
 
         return actions
+
+    def reset_hidden(self, ag_idx=None):
+        """
+        エピソード開始時 / エージェント再投入時に RNN のhidden state を戻す
+        """
+        if self.runner is not None and hasattr(self.runner, "reset_hidden"):
+            self.runner.reset_hidden(ag_idx)
     
