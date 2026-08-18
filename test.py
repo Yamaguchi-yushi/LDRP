@@ -94,6 +94,15 @@ if __name__ == "__main__":
     ]
     lare_kwargs = {k: getattr(config, k) for k in lare_path_keys if hasattr(config, k)}
 
+    dynamic_agent_keys = [
+        "use_dynamic_agents",
+        "randomize_initial_active",
+        "min_active_agents",
+        "max_active_agents",
+        "initial_active_num",
+    ]
+    dynamic_agent_kwargs = {k: getattr(config, k) for k in dynamic_agent_keys if hasattr(config, k)}
+
     # path_planner が PBS のときだけ pbs_mode=True にする.
     # PBS は待機 agent の予定も path 計画に反映するため current_goal を非 None に
     # 保つ必要があるが、それ以外 (QMIX/IQL/VDN/MAA2C) では None のままにして
@@ -123,6 +132,7 @@ if __name__ == "__main__":
             pbs_mode=pbs_mode,
             allow_reassign_before_pickup=reassign_flag,
             **lare_kwargs,
+            **dynamic_agent_kwargs,
         )
         """
         with open("./config/algo/" + config.algo + ".yaml", 'r') as file:
