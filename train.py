@@ -78,6 +78,10 @@ for i in range(num_runs):
     #     f'env_args.task_p_high=0.8 '
     #     f'env_args.task_p_low=0.1 '
     #     f'env_args.task_switch_prob=0.01 '
+    #     f'env_args.use_dynamic_agents=False '
+    #     f'env_args.randomize_initial_active=False '
+    #     f'env_args.min_active_agents=2 '
+    #     f'env_args.max_active_agents=5 '
     #     )
 
     proc = subprocess.Popen(command, shell=True)
