@@ -186,6 +186,9 @@ def run_sequential(args, logger):
 
         model_path = os.path.join(args.checkpoint_path, str(timestep_to_load))
 
+        if os.path.exists(os.path.join(model_path, "path", "agent.th")):
+            model_path = os.path.join(model_path, "path")
+
         logger.console_logger.info("Loading model from {}".format(model_path))
         learner.load_models(model_path)
         runner.t_env = timestep_to_load
