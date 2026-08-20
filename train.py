@@ -9,7 +9,7 @@ command = [
 'python3 src/main.py --config=qmix --env-config=gymma with env_args.time_limit=500 env_args.key="drp_env:drp_safe-4agent_map_aoba00-v2" env_args.state_repre_flag="onehot_fov" > train_results/qmix_drp_safe-4agent_map_8x5-v2.txt 2>&1'
 ]
 
-num_runs = 3
+num_runs = 5
 maxpurocesses = 1
 running_processes = []
 
@@ -56,6 +56,8 @@ for i in range(num_runs):
         f'env_args.randomize_initial_active=False '
         f'env_args.min_active_agents=2 '
         f'env_args.max_active_agents=5 '
+        # 同時学習
+        f'train_task_assigner=False '
         )
 
     # GPUを使用するMARLアルゴリズムをCPUで実行する場合
