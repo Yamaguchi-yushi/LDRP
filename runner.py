@@ -68,6 +68,7 @@ class Runner():
         args.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
         self.info_buffer = deque(maxlen=self.test_num)
+        self.model_seed = int(getattr(args, "model_seed", 0) or 0)
         self.both_policy_manager = Policy(self.args)
         # 実際に行動を決めるのは both_policy_manager 配下のインスタンス。
         # ここで別途 new すると「行動する側」と「学習する側」が別物になり,
@@ -82,6 +83,17 @@ class Runner():
             log_dir = os.path.join("tmp_results", "task_ppo", f"{args.map_name}_{args.agent_num}_{args.path_planner}_{stamp}",)
             self.writer = SummaryWriter(log_dir=log_dir)
             print(f"[Runner] TensorBoard log_dir: {log_dir}")
+
+    def _condition_id(self):
+        a = self.args
+        tag = f"_{a.method_tag}" if getattr(a, "method_tag", "") else ""
+        reassign = getattr(a, "reassign_before_pickup", "base")
+        env_tag = "safe" if getattr(a, "use__safe_env", True) else "unsafe"
+        env_re = "_envreassign" if getattr(a, "allow_reassign_before_pickup", False) else ""
+        train_n = getattr(a, "mat_model_agent_num", None) if a.path_planner == "mat_dec" else None
+        train = f"_train{train_n}" if train_n else ""
+        return (f"{a.map_name}/{a.agent_num}agent/"
+                f"{env_tag}_{a.path_planner}{tag}_{reassign}_{a.task_assigner}{train}{env_re}")
 
     def get_avail_actions(self):
         avail_actions = []
@@ -186,7 +198,7 @@ class Runner():
                     stats = assigner.update()
                     if self.writer is not None:
                         for k, v in stats.items():
-                            self.writer.add_scalar(f"ppo/{k}", v, self.current_step)
+                            self.writer.add_scalar(f"task/{k}", v, self.current_step)
 
                 if hasattr(assigner, "maybe_save_models"):
                     assigner.maybe_save_models(self.current_step)
