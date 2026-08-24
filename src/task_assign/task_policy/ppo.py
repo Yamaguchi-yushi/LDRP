@@ -288,7 +288,7 @@ class PPOAgent():
         for _ in range(agent_num):
             if not any(len(t) == 0 for t in assigned_tasklist):
                 break
-            if len_current_task <= 0:
+            if len_current_task <= 0 and not self.use_dynamic_agents:
                 break
 
             state = self.create_state(env, current_tasklist, assigned_tasklist)
