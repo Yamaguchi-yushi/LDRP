@@ -153,6 +153,9 @@ def run_sequential(args, logger):
         from src.task_assign.task_policy.ppo import PPOAgent
         runner.task_assigner = PPOAgent(SN(**_ta))
         runner.task_assigner.set_test_mode(False)
+        assert bool(args.env_args.get("use_dynamic_agents", False)) == bool(runner.task_assigner.use_dynamic_agents), \
+            ("use_dynamic_agents mismatch between env_args and task assigner. "
+             "Align env_args (gymma.yaml / train.py) with src/config/default.yaml.")
         logger.console_logger.info(
             f"[joint] task assigner enabled (n_envs={runner.batch_size})")
 
