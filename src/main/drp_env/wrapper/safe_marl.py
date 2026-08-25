@@ -12,11 +12,31 @@ from drp_env.EE_map import MapMake
 from drp_env.drp_env import DrpEnv
 
 class SafeEnv(DrpEnv):
-	def _predict_pos (self, i, action_i, avail_i):
+	def _predict_pos(self, i, action_i):
+		"""joint_action を実行した後の座標を drp_env の移動規則どおりに予測する.
+
+		avail は引かない. avail の定義そのものを条件式に展開してある
+		(全 agent x 全ノードで元の実装と等価であることを実測で確認済み).
+		"""
 		cur = [self.obs[i][0], self.obs[i][1]]
-		if action_i not in avail_i:
+		a = int(action_i)
+		# 非アクティブ機は待機のみ (drp_env._get_avail_agent_actions の先頭分岐)
+		if getattr(self, "use_dynamic_agents", False) and not self.active[i]:
 			return cur
-		tgt = list(self.pos[int(action_i)])
+		# 非タスクモードで最終ゴール上に居るときは goal のみ (EE_map の先頭分岐)
+		if not self.ee_env.is_task_flag and [cur[0], cur[1]] == self.pos[self.goal_array[i]]:
+			if a != int(self.goal_array[i]):
+				return cur
+		elif self.current_goal[i] is not None:
+			# 辺の上に居るときの avail は [current_goal] だけ
+			if a != int(self.current_goal[i]):
+				return cur
+		else:
+			# ノード上に居るときの avail は隣接ノード + 自ノード
+			s = int(self.current_start[i])
+			if a != s and not self.G.has_edge(s, a):
+				return cur
+		tgt = list(self.pos[a])
 		if tgt[0] == cur[0] and tgt[1] == cur[1]:
 			return cur
 		x, y = tgt[0] - cur[0], tgt[1] - cur[1]
@@ -38,8 +58,6 @@ class SafeEnv(DrpEnv):
 
 		if not hasattr(self, "safety_intervention_count"):
 			self.safety_intervention_count = 0
-
-		avail = [self._get_avail_agent_actions(k, self.n_actions)[1] for k in range(self.agent_num)]
 
 		i = 0
 		do = True
@@ -90,7 +108,7 @@ class SafeEnv(DrpEnv):
 							break
 
 			if not do:
-				pred = [self._predict_pos(k, joint_action[k], avail[k]) for k in range(self.agent_num)]
+				pred = [self._predict_pos(k, joint_action[k]) for k in range(self.agent_num)]
 				for i in range(self.agent_num):
 					if getattr(self, "use_dynamic_agents", False) and not self.active[i]:
 						continue

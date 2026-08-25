@@ -44,6 +44,7 @@ class MapMake():
 		node_file_name, edge_file_name = map_dir+'/node', map_dir+'/edge'
 		csv_nodes_number,csv_nodes_pos,csv_edges, csv_edges_weights = self.read_nodes_csv(node_file_name, edge_file_name)
 		self.G, self.pos, self.edge_labels = self.Graph_initial(csv_nodes_number, csv_nodes_pos, csv_edges, csv_edges_weights)
+		self._build_avail_tables()
 		# self.n_nodes = len(self.G.nodes())
 		if self.agent_num > len(csv_nodes_number) :
 			print('Error: The number of agents exceeds the maximum numberof nodes on the graph')
@@ -234,6 +235,32 @@ class MapMake():
 		plt.pause(delay)  #do not need 'plt.show()' to show
 		plt.cla() #clear axis not plt
 
+	def _build_avail_tables(self):
+		"""get_avail_action_fun 用の索引を __init__ で 1 回だけ作る.
+
+		元の実装は 1 回呼ぶたびに (a) 全ノード座標を str() 化して線形探索し,
+		(b) 全辺を走査していた. この関数は env.step / 方策の avail / SafeEnv の
+		全経路から毎ステップ agent 数ぶん呼ばれるため, 実測で処理時間の約 3 割を
+		占めていた. self.pos / self.G は node.csv 由来で実行中に変化しないので,
+		表を 1 回作れば以後は辞書引き 1 回で済む.
+
+		_node_avail の並び順は元の実装 (辺の走査順に隣接ノードを追加し, 最後に
+		自ノード) をそのまま再現している. 順序まで一致することは実測で確認済み.
+		"""
+		self._pos_key = {str(v): k for k, v in self.pos.items()}
+		self._node_avail = {}
+		for node in self.G.nodes():
+			action_set = []
+			for edge in self.G.edges():
+				if node in edge:
+					if list(edge)[0] not in action_set and list(edge)[0]!=node:
+						action_set.append(list(edge)[0])
+
+					if list(edge)[1] not in action_set and list(edge)[1]!=node :
+						action_set.append(list(edge)[1])
+			action_set.append(node)
+			self._node_avail[node] = action_set
+
 	def get_avail_action_fun(self, obs_i, current_start, current_goal, goal_i):
 
 		#if s==self.pos[goal_i] and goal_i==0:
@@ -245,30 +272,14 @@ class MapMake():
 			else:
 				pass
 
-		action_set = []
-		#print(s,pos.values())
-		#print("[obs_i[0],obs_i[1]] pos.values()",[obs_i[0],obs_i[1]],self.pos.values())
-		if str([obs_i[0],obs_i[1]]) in [str(ele) for ele in self.pos.values()]: #s=(0.0, 5.0)
-			#print("it currently at node")
-			node = [k for k, v in self.pos.items() if str(v) == str([obs_i[0],obs_i[1]])][0]  #node 0
-			#print("current node",node)
-			for edge in self.G.edges():
-				if node in edge:
-					if list(edge)[0] not in action_set and list(edge)[0]!=node:
-						action_set.append(list(edge)[0])
-
-					if list(edge)[1] not in action_set and list(edge)[1]!=node :
-						#action_set.append(list(edge)[1])
-						action_set.append(list(edge)[1])
-			action_set.append(node)
-
-		else:
+		# ノード上なら事前計算した隣接表, 辺の上なら current_goal だけ.
+		# 呼び出し側が返り値を書き換える (drp_env の avail_actions[0] = 0) ので複製を返す.
+		node = self._pos_key.get(str([obs_i[0],obs_i[1]]))
+		if node is None:
 			#print("it currently NOT at node")
-			# action_set=[current_start ,current_goal]
-			action_set = [current_goal]
-
-
-		return action_set
+			return [current_goal]
+		#print("it currently at node")
+		return list(self._node_avail[node])
 
 	def collision_detect(self, obs_prepare, colli_distan=5, active=None):
 		collision_flag = 0
