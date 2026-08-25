@@ -297,9 +297,11 @@ class MapMake():
 		self.is_task_flag = True
 	
 	# create one task
-	def create_task(self, timelimit, rng=None):
+	def create_task(self, timelimit, rng=None, exclude_nodes=None):
 		r = rng if rng is not None else np.random
 		G_nodes_copy = copy.deepcopy(list(self.G.nodes()))
+		if exclude_nodes:
+			G_nodes_copy = [n for n in G_nodes_copy if n not in exclude_nodes]
 		start_node = r.choice(G_nodes_copy)
 		G_nodes_copy.remove(start_node)
 		goal_node = r.choice(G_nodes_copy)
@@ -308,7 +310,7 @@ class MapMake():
 
 	# create all tasklist
 	def create_tasklist(self, timelimit, agent_num, task_density, mode='fixed',
-					rng=None, p_high=0.8, p_low=0.1, switch_prob=0.01):
+					rng=None, p_high=0.8, p_low=0.1, switch_prob=0.01, exclude_nodes=None):
 		r = rng if rng is not None else np.random
 		tasklist=[]
 		state = 'sparse'  # Initial state for MMPP
@@ -324,7 +326,7 @@ class MapMake():
 				random_num = 1 if r.random() < p else 0
 			else:
 				raise ValueError("Invalid mode. Choose from 'fixed', 'bernoulli', or 'mmpp'.")
-			tasklist.append([self.create_task(timelimit, rng=r) for _ in range(random_num)])		#random_num is a number greater than or equal to 0 determined
+			tasklist.append([self.create_task(timelimit, rng=r, exclude_nodes=exclude_nodes) for _ in range(random_num)])		#random_num is a number greater than or equal to 0 determined
 																								#with probability by agent_num and task_density
 		#print(tasklist)
 		return tasklist

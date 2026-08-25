@@ -22,7 +22,7 @@ for i in range(num_runs):
         f't_max=100050000 ' 
         f'env_args.key="drp_env:drp_safe-7agent_map_aoba00-v2" '
         f'env_args.state_repre_flag="onehot_fov" '
-        f'env_args.use_lare_path=False '
+        f'env_args.use_lare_path=True '
         f'env_args.use_lare_path_training=True '
         f'env_args.use_pretrained_lare_path=True '
         f'env_args.pretrained_lare_path_model_name="FT_QMIX_PATH_Safe_map_8x5_2agents_10.0M_Safe_map_aoba00_2agents_5.0M_checkpoint.pth" '
@@ -50,7 +50,7 @@ for i in range(num_runs):
         #    分しかないが、経路方策は需要を観測しないので問題ない。
         #    フリート方策の学習・評価 (time_limit=3000) では 0.0017 にすること。
         # --- ランダム化 OFF のときだけ使う固定値 ------------------------------
-        f'env_args.task_arrival="fixed" '   # 'fixed' or 'bernoulli' or 'mmpp'
+        f'env_args.task_arrival="bernoulli" '   # 'fixed' or 'bernoulli' or 'mmpp'
         f'env_args.task_density=0.02 '
         f'env_args.use_dynamic_agents=False '
         f'env_args.randomize_initial_active=False '
