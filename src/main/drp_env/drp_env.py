@@ -1410,7 +1410,11 @@ class DrpEnv(gym.Env):
 
 		if self.is_tasklist: #ここから
 			if self.start_ori_array[i] == self.goal_array[i]:
-				r_i = 0
+				if self.use_dynamic_agents and not self.active[i] \
+						and self.pending_off[i] and self.assigned_task[i] == []:
+					r_i = self.r_move*self.speed
+				else:
+					r_i = 0
 			else:
 				if str(pos_agenti)==str(self.pos[self.goal_array[i]]): # at goal				
 					if len(self.assigned_tasks[i])>0 : #first time to reach goal 
