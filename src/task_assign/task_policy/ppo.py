@@ -315,9 +315,12 @@ class PPOAgent():
                     mask[[stride * k + j for k in range(agent_num)]] = 1
 
             if self.use_dynamic_agents:
+                min_active = int(getattr(env, "min_active_agents", 1))
+                active_count = sum(1 for k in range(agent_num) if env.active[k] and not env.pending_off[k])
                 for k in range(agent_num):
                     can_off = (len(assigned_tasklist[k]) == 0) and env.active[k] \
-                        and (not env.pending_off[k]) and task_assign[k] == -1
+                        and (not env.pending_off[k]) and task_assign[k] == -1 \
+                        and (active_count - 1 >= min_active)
                     if not can_off:
                         mask[stride * k + task_num] = 1
                 mask[-1] = 1  
