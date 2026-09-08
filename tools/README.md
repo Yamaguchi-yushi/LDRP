@@ -3,7 +3,13 @@
 | ツール | 対象 | 何をするか |
 |---|---|---|
 | [collect_runs.py](collect_runs.py) | **方策学習** | 全マシンの run を収集し、状態・進捗・終了予定を出す。モデル回収、Notion 同期 |
-| [eval_report.py](eval_report.py) | **方策評価** | `results/summary.csv` を条件ごとに分解してダッシュボードで見せる |
+| [eval_report.py](eval_report.py) | **方策評価** | `results/summary.csv` を条件ごとに分解して表示 |
+| [plan.py](plan.py) | 実験計画 | Notion の表 (`plan.md`) をそのままパースする |
+| [dashboard/](dashboard/) | 両方 | ローカル Web アプリ (学習の進捗 / 評価結果 の 2 タブ) |
+
+**収集される側のマシン** (SSH で繋がらない Mac など) のセットアップは
+[SETUP_export_machine.md](SETUP_export_machine.md) を参照。そのマシンで
+作業する Claude Code 向けの手順書になっている。
 
 ---
 

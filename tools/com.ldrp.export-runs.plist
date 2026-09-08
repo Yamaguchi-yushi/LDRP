@@ -5,6 +5,7 @@
   Notion にも外部にも接続しない。集約側の Mac がそのフォルダを読む。
 
   置き換えるのは machine の値だけ (例: 黒 / MacB)。
+  スクリプトはリポジトリのものを直接使うので、git pull すれば更新される。
   パスは ~ のままでよい (sh が展開するのでユーザー名に依存しない)。
 
     cp tools/com.ldrp.export-runs.plist ~/Library/LaunchAgents/
@@ -24,7 +25,7 @@
   <array>
     <string>/bin/sh</string>
     <string>-lc</string>
-    <string>python3 ~/.ldrp/collect_runs.py --export ~/Library/Mobile\ Documents/com~apple~CloudDocs/LDRP_runs --machine 黒 --repo ~/LDRP</string>
+    <string>python3 ~/LDRP/tools/collect_runs.py --export ~/Library/Mobile\ Documents/com~apple~CloudDocs/LDRP_runs --machine 黒 --repo ~/LDRP</string>
   </array>
 
   <!-- 3600 秒 = 1 時間ごと -->
