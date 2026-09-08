@@ -524,6 +524,30 @@ use_lare_path_training: false   # 学習はする, 環境の報酬は元のま�
 
 ---
 
+### 2026-08-28 学習 run のマシン横断収集ツール `tools/collect_runs.py` 追加
+
+- **意図**: 実験結果 (seed / 条件 / 完遂ステップ数) を Notion に手で書き写す作業を無くす。あわせて「設定した `t_max` まで完遂したか」「途中でプロセスが死んでいないか」を機械的に判定できるようにする
+- **変わること**:
+  - 新ツール `tools/collect_runs.py` と設定ファイル `tools/collect_config.yaml`, 手順書 [tools/README.md](tools/README.md) を追加。**既存の学習・評価コードには一切触っていない** (sacred の出力を読むだけ)
+  - 3 モード: **pull** (Mac から各ホストへ ssh し、スクリプト自身を stdin で送り込んで実行) / **drop** (SSH で繋がらないマシンが `--export DIR` で共有フォルダに書き出し、集約側が `drop: true` で読む。共有フォルダは iCloud Drive / Dropbox / NFS / USB など何でもよい。run 一覧とモデルの両方が集まる) / **push** (各マシン上で `--hosts local` を cron 実行。Notion の行のみ)。`run_uid = {machine}:{results|tmp_results}/{algo}/{env_key}/{run_id}` をキーに upsert するので、モードを混ぜても 1 つの Notion DB に重複なく集まる
+  - 状態判定: `OK` (t_max 完遂) / `SHORT` (COMPLETED だがログ上 t_max 未達) / `RUN` (学習中) / `STALL` (RUNNING だが heartbeat が `stale_minutes` 停止 = プロセス落ち) / `FAIL`。`--check` で異常があれば exit 1
+  - 出力形式: `table` / `markdown` (Notion 貼り付け用) / `csv` / `jsonl` / `summary` (条件ごとの完遂 seed 一覧) / `none`。`--notion` で Notion DB へ直接同期、`--notion-create-db PAGE_ID` で必要なプロパティを揃えた DB を新規作成
+  - 読むファイルは `config.json` / `run.json` (数 KB) と `cout.txt` の末尾 64KB のみ。`cout.txt` が 0 byte の環境 (stdout をシェルでリダイレクトしている GPU 機) では `metrics.json` の**末尾 256KB** から最後の t_env を拾う。1〜5MB の `metrics.json` / `info.json` を全体ロードすることはない
+  - リモート側の要件は `python3` (標準ライブラリのみ)。リモートにファイルを置かない
+  - **学習済みモデルの回収**: `--fetch-models DIR` で、完遂した run の**最終ステップのみ**を各マシンから回収する。epymarl の `unique_token = "{algo}_seed{seed}_{env_key}_{起動時刻}"` により sacred の run と 1:1 に紐づく。`opt.th` / `agent_opt.th` / `critic_opt.th` は評価に不要なので既定で除外 (done 53 run で約 25MB)。既に取得済みのものは再取得しない。転送は ssh 越しの tar ストリーム 1 本 (ファイル名は NUL 区切りで `tar --null -T -` に渡すため `unique_token` の空白・`:` でも壊れない)
+  - 回収先は `DIR/{machine}/{algo}_{map}_{N}agents_seed{seed}_step{t_env}/` に整形。`manifest.jsonl` と `install_hints.sh` (評価用ディレクトリへの `cp` コマンド案) を書き出す
+  - **`--install-models`**: 回収したモデルを評価側の名前 `{map}_{N}_{planner}[_{method_tag}]_base_seed{seed}.th` で `src/all_policy/models/safe/` に設置する (既定 off / 同名は上書きしない / `--models-dir` で置き場所変更可)。`method_tag` は「事前学習した LaRe モデルを使ったか」から導出する: `pretrained` / `finetuning` → `ours`、`scratch` / `off` → `safe`、非 Safe 環境で学習したものは `unsafe`。規則は `collect_config.yaml` の `method_tag_by_lare_mode` で変更できる (Notion にも `method tag` 列として出る)
+  - 1 時間ごとの定期実行定義を同梱: `tools/com.ldrp.collect-runs.plist` (集約側: 巡回 → Notion 更新 → モデル回収) と `tools/com.ldrp.export-runs.plist` (drop モードの相手側: 共有フォルダへ書き出すだけ。Notion にも外部にも接続しない)
+  - Notion token は環境変数のほかファイルからも読む (`~/.config/ldrp/notion_token` 等。cron から使うため。`ps` に出るのでコマンドライン引数では受け取らない)。`--notion-check` で token / DB / プロパティの過不足を検証できる
+  - `--bootstrap LABELS` で、各マシンに「スクリプト本体 + token + push.sh」を設置し、そのマシン自身が Notion に書き込めるようにする (git pull 不要。crontab への登録は `--bootstrap-install-cron` を付けたときだけ)
+  - **学習パラメータと seed の保存**: `config.json` を whitelist せず全文保持する (従来は 86 キーのうち 36 キーしか保存しておらず、`lr` / `gamma` / `batch_size` / `epsilon_*` / `mixer` / `exclude_station_from_tasks` などが落ちていた)。条件としての同一性を `param_hash` (8 桁) で表し、同じ条件のはずの seed でパラメータが割れていたら `--format summary` で警告する。ハッシュは「`None`/`False` はキー無しと同一視」「有効化フラグが off のとき無視されるキーは落とす」の 2 点で正規化する
+  - **集計の条件キーにマップを含めるよう修正**: 従来 `condition` にマップが入っておらず、`3agent 8M | iql | safe` が map_5x4 / map_8x5 / map_aoba01 を 1 条件に混ぜていた (`done seeds` が別マップ混在の一覧になっていた)
+  - 実行中 run の終了予定時刻 (`eta`) を実測ペースから算出。`--notify` で完了/異常のデスクトップ通知、`--quick` で「実行中の run だけを読み直す」軽い完了チェック (2 分おき想定)、`--format status` で常駐パネル用の要約を出力
+- **触ったファイル**: 新規 `tools/collect_runs.py`, `tools/collect_config.yaml`, `tools/com.ldrp.collect-runs.plist`, `tools/com.ldrp.export-runs.plist`, `tools/com.ldrp.quick-check.plist`, `tools/README.md`, `design/run_collector.md` (実装の説明) / 改修 `.gitignore` (`tools/.run_cache.jsonl`, `models_inbox/`, `tools/.notion_token` を追加)
+- **互換性**: 影響なし (既存コードへの変更なし)
+
+---
+
 ### 2026-06-26 MAT-Dec (Multi-Agent Transformer, 分散実行版) アルゴリズム追加
 
 - **意図**: epymarl に Transformer ベースの方策 MAT-Dec を追加し、QMIX/IQL/MAPPO 等に加えて選択可能にする。LDRP_GPU リポの MAT 実装を CPU 開発機向けに移植 (GPU 専用の `multiprocessing spawn` 化は除外し、既定の fork のまま)

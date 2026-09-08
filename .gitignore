@@ -22,3 +22,13 @@ src/lare/task/checkpoints/
 src/lare/path/saved_models/
 src/lare/task/saved_models/
 CLAUDE.md
+# collect_runs.py のローカルキャッシュ
+tools/.run_cache.jsonl
+
+# collect_runs.py が回収した学習済みモデルの受け皿
+models_inbox/
+tools/.notion_token
+
+# tools/: 接続先と実験計画は各自のローカルに置く (見本を .example として公開)
+tools/collect_config.yaml
+tools/plan.md
