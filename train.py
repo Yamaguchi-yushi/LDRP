@@ -1,5 +1,22 @@
 import subprocess
 import time
+import json
+import os
+
+_SLOT = os.path.expanduser("~/.ldrp/batch_%d.json" % os.getpid())
+
+def _publish_batch(started, cmd=None):
+    try:
+        os.makedirs(os.path.dirname(_SLOT), exist_ok=True)
+        rec = {"pid": os.getpid(), "total": num_runs,
+               "started": started, "updated": time.time()}
+        if cmd:
+            rec["cmd"] = cmd
+        with open(_SLOT, "w") as f:
+            json.dump(rec, f)
+    except OSError:
+        pass
+
 """
 command = [
     ["python3", "test.py", "map_5x4", "3", "pbs", "tp"]
@@ -10,8 +27,9 @@ command = [
 ]
 
 num_runs = 5
-maxpurocesses = 1
+maxpurocesses = 2
 running_processes = []
+_publish_batch(0)
 
 for i in range(num_runs):
     #algとmap，実行step数確認，drp_envのpbs用の変更箇所
@@ -19,15 +37,15 @@ for i in range(num_runs):
     command = (
         f'python src/epymarl/src/main.py --config=qmix --env-config=gymma '
         f'with env_args.time_limit=500 '
-        f't_max=100050000 ' 
-        f'env_args.key="drp_env:drp_safe-7agent_map_aoba00-v2" '
+        f't_max=20050000 ' 
+        f'env_args.key="drp_env:drp_safe-5agent_map_8x5-v2" '
         f'env_args.state_repre_flag="onehot_fov" '
-        f'env_args.use_lare_path=True '
+        f'env_args.use_lare_path=False '
         f'env_args.use_lare_path_training=True '
-        f'env_args.use_pretrained_lare_path=True '
+        f'env_args.use_pretrained_lare_path=False '
         f'env_args.pretrained_lare_path_model_name="FT_QMIX_PATH_Safe_map_8x5_2agents_10.0M_Safe_map_aoba00_2agents_5.0M_checkpoint.pth" '
-        f'env_args.use_finetuning_lare_path=False '
-        f'env_args.finetuning_lare_path_model_name="QMIX_PATH_Safe_map_8x5_2agents_10.0M_checkpoint.pth" '
+        f'env_args.use_finetuning_lare_path=True '
+        f'env_args.finetuning_lare_path_model_name="QMIX_PATH_Safe_map_8x5_7agents_20.0M_checkpoint.pth" '
         f'env_args.allow_reassign_before_pickup=False '
         # --- タスク到着のランダム化 (学習用) ---------------------------------
         # True: エピソード毎に bernoulli(p ランダム) / mmpp を引き直す。
@@ -50,14 +68,14 @@ for i in range(num_runs):
         #    分しかないが、経路方策は需要を観測しないので問題ない。
         #    フリート方策の学習・評価 (time_limit=3000) では 0.0017 にすること。
         # --- ランダム化 OFF のときだけ使う固定値 ------------------------------
-        f'env_args.task_arrival="bernoulli" '   # 'fixed' or 'bernoulli' or 'mmpp'
+        f'env_args.task_arrival="fixed" '   # 'fixed' or 'bernoulli' or 'mmpp'
         f'env_args.task_density=0.02 '
         f'env_args.use_dynamic_agents=False '
         f'env_args.randomize_initial_active=False '
-        f'env_args.min_active_agents=2 '
-        f'env_args.max_active_agents=5 '
+        f'env_args.min_active_agents=1 '
+        f'env_args.max_active_agents=7 '
         # 同時学習
-        f'train_task_assigner=False '
+        f'train_task_assigner=True '
         )
 
     # GPUを使用するMARLアルゴリズムをCPUで実行する場合
@@ -88,6 +106,7 @@ for i in range(num_runs):
 
     proc = subprocess.Popen(command, shell=True)
     running_processes.append(proc)
+    _publish_batch(i + 1, command)
 
     while len(running_processes) >= maxpurocesses:
         for p in running_processes[:]:
@@ -99,3 +118,7 @@ for p in running_processes:
     p.wait()
 
 print("All runs completed.")
+try:
+    os.remove(_SLOT)
+except OSError:
+    pass
