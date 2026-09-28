@@ -5,7 +5,6 @@
 | [collect_runs.py](collect_runs.py) | **方策学習** | 全マシンの run を収集し、状態・進捗・終了予定を出す。方策モデルの回収と保管 |
 | [eval_report.py](eval_report.py) | **方策評価** | `results/summary.csv` を条件ごとに分解して表示 |
 | [plan.py](plan.py) | 実験計画 | `plans/*.md` をパースする。Notion の表をそのまま貼れる |
-| [VISIT_CHECKLIST.md](VISIT_CHECKLIST.md) | 運用 | 他マシンに触れる日の作業手順 |
 | [dashboard/](dashboard/) | 両方 | ローカル Web アプリ (学習の進捗 / 評価結果 の 2 タブ) |
 
 **収集される側のマシン** (SSH で繋がらない Mac など) のセットアップは
@@ -827,7 +826,7 @@ drop モードでは ssh の代わりに共有フォルダを挟む。相手の�
 ## 研究室への配布 (テンプレートの LDRP へ書き出す)
 
 他の人に使ってもらうときは、このディレクトリをそのまま渡さず **`export_tools.py` で書き出す**。
-自分専用のもの (設定・計画表・キャッシュ・現地作業の手順書・自分用の plist) は持っていかず、
+自分専用のもの (設定・計画表・キャッシュ・自分用の plist) は持っていかず、
 README と設定の見本は [dist/](dist/) の配布用に差し替わる。
 
 ```bash
