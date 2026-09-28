@@ -247,7 +247,10 @@ function renderTrain() {
         <td><span class="pb"><i style="width:${((r.progress || 0) * 100).toFixed(0)}%"></i></span>
             ${((r.progress || 0) * 100).toFixed(0)}%</td>
         <td class="mut num">${M(r.t_last)}/${M(r.t_max)}M</td>
-        <td class="num">${dur(r.remaining_sec)}</td><td>${when(r.eta)}</td>
+        <td class="num">${dur(r.remaining_sec)}</td><td>${
+          // 一時停止中 (Ctrl-Z) は再開の時刻が分からないので予定時刻は出さない
+          r.paused ? `<span class="wrn" title="プロセスが一時停止しています (ps の状態 T)。再開すれば残り時間で終わります">⏸ 一時停止中</span>`
+                   : when(r.eta)}</td>
         <td>${esc(r.machine)}</td>
         <td>${(cond => r.in_plan
             // ボタンを置くと行が騒がしくなるので、条件名そのものを押させる。
@@ -412,7 +415,9 @@ function renderTrain() {
         else if (r.state === "running")
           st = `<span class="pb"><i style="width:${pct}%"></i></span> ${pct}%`
              + ` <span class="steps">${steps}</span>`
-             + ` <span class="mut">残り ${dur(r.remaining_sec)} → ${when(r.eta)} 終了予定</span>`;
+             + (r.paused
+                 ? ` <span class="wrn">⏸ 一時停止中</span> <span class="mut">(再開すれば残り ${dur(r.remaining_sec)})</span>`
+                 : ` <span class="mut">残り ${dur(r.remaining_sec)} → ${when(r.eta)} 終了予定</span>`);
         else
           st = `<span class="err">✖ ${esc(r.state)}</span>`
              + ` <span class="mut">${steps} で停止</span>${stopped}`;

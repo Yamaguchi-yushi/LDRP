@@ -492,6 +492,9 @@ def scan_run_dir(run_dir, machine, root_tag, tail_bytes, repo=None, model_index=
         "cfg": cfg_full,
         "env": env_full,
         "param_hash": param_hash(cfg_full, env_full),
+        # 学習プロセスの状態。"stopped" = Ctrl-Z 等で一時停止中 / "running" / None = 不明
+        "proc_state": (match_training_proc(cfg_full, env_full, run.get("start_time"))
+                       if run.get("status") == "RUNNING" else None),
     }
 
 
@@ -500,6 +503,87 @@ def root_tag_of_run(run_dir):
     d = os.path.abspath(run_dir)
     sacred_root = os.path.dirname(os.path.dirname(os.path.dirname(d)))
     return _root_tag(sacred_root)
+
+
+# ---- 学習プロセスの状態 (一時停止の検出) -------------------------------------
+# Ctrl-Z で一時停止すると sacred の heartbeat も止まるので、90 分後には「停止 (stalled)」
+# と区別できなくなる。ps の状態 (T = stopped) を見て「一時停止中」と判定する。
+# sacred の run.json に pid は残らないので、起動時刻と起動引数で run とプロセスを結ぶ
+_PROC_CACHE = {"t": 0.0, "procs": None}
+PS_MAIN_RE = re.compile(r"^(?:\S*/)?python[0-9.]*\s+(?:-\S+\s+)*\S*main\.py\b")
+
+
+def _training_procs(ttl=30.0):
+    """epymarl の main.py (python 本体) のプロセス一覧。同じ走査中は使い回す."""
+    now = time.time()
+    if _PROC_CACHE["procs"] is not None and now - _PROC_CACHE["t"] < ttl:
+        return _PROC_CACHE["procs"]
+    procs = []
+    try:
+        # 日本語ロケールだと lstart の月・曜日が日本語になるので英語に固定する
+        # 共有 GPU では他のユーザーも学習を回しているので、自分のプロセスだけを見る
+        # (見ないと他人の run を自分の一時停止と取り違える。GPU1 で他ユーザーの main.py 6 本を確認)
+        out = subprocess.check_output(["ps", "-U", str(os.getuid()), "-o", "pid=,stat=,lstart=,args="],
+                                      stderr=subprocess.DEVNULL,
+                                      env=dict(os.environ, LC_ALL="C", LANG="C"))
+    except (OSError, subprocess.CalledProcessError):
+        out = b""
+    for line in out.decode("utf-8", "replace").splitlines():
+        tok = line.split(None, 7)
+        if len(tok) < 8:
+            continue
+        pid, stat, args = tok[0], tok[1], tok[7]
+        # /bin/sh -c python ... のシェルは除き、python 本体だけを見る
+        if not PS_MAIN_RE.search(args):
+            continue
+        try:
+            started = time.mktime(time.strptime(" ".join(tok[2:7]), "%a %b %d %H:%M:%S %Y"))
+        except ValueError:
+            started = None
+        procs.append({"pid": pid, "stat": stat, "start": started, "args": args})
+    _PROC_CACHE.update(t=now, procs=procs)
+    return procs
+
+
+def match_training_proc(cfg, env, start_time):
+    """sacred の run に対応する学習プロセスを探し、その状態を返す.
+
+    "stopped" = 一時停止中 (ps の STAT が T) / "running" / None = 見つからない。
+    起動引数 (アルゴリズム・環境名・t_max) が合うプロセスのうち、起動時刻が sacred の
+    start_time に最も近いものを採る。同じ条件を同時に回していても取り違えない。
+    """
+    algo = (cfg or {}).get("name")
+    key = (env or {}).get("key")
+    if not algo or not key:
+        return None
+    t_max = (cfg or {}).get("t_max")
+    cand = []
+    for p in _training_procs():
+        a = p["args"]
+        if not re.search(r"--config=%s(\s|$)" % re.escape(str(algo)), a):
+            continue
+        if str(key) not in a.replace('"', "").replace("'", ""):
+            continue
+        if t_max and not re.search(r"(^|\s)t_max=%s(\s|$)" % int(t_max), a):
+            continue
+        cand.append(p)
+    if not cand:
+        return None
+    best = cand[0]
+    t0 = None
+    if start_time:
+        import calendar
+        dt = parse_dt(start_time)
+        if dt is not None:
+            t0 = calendar.timegm(dt.utctimetuple())
+    if t0 is not None:
+        timed = [p for p in cand if p["start"] is not None]
+        if timed:
+            best = min(timed, key=lambda p: abs(p["start"] - t0))
+            if abs(best["start"] - t0) > 900:
+                # 起動時刻が 15 分以上ずれている = 別の run のプロセス。当て推量はしない
+                return None
+    return "stopped" if best["stat"].startswith("T") else "running"
 
 
 BATCH_DIR = "~/.ldrp"
@@ -577,7 +661,9 @@ def scan_batches(machine):
     """
     live = {}
     try:
-        out = subprocess.check_output(["ps", "-eo", "pid,etime,args"],
+        # 自分のプロセスだけを見る。共有 GPU で他のユーザーの train.py を
+        # 自分の「実行予定」に数えないため
+        out = subprocess.check_output(["ps", "-U", str(os.getuid()), "-o", "pid,etime,args"],
                                       stderr=subprocess.DEVNULL)
     except (OSError, subprocess.CalledProcessError):
         out = b""
@@ -842,6 +928,34 @@ def norm_chain(text):
     return " ".join(t.split())
 
 
+def recent_rate(rec, t_ref, t_last):
+    """記録点から直近のペース (step/sec) を出す。区間が 1 つも無ければ None.
+
+    隣り合う 2 点の区間ごとにペースを出し、直近 RECENT_RATE_INTERVALS 区間の**中央値**を取る。
+    一時停止をまたいだ区間は遅く出るが、中央値なら 1〜2 区間は無視できる。
+    ステップが進んでいない区間 (heartbeat だけ進んだ) は捨てる。
+    """
+    pts = []
+    for b, t in rec.get("progress_samples") or []:
+        dt = parse_dt(b)
+        if dt is not None:
+            pts.append((dt, int(t)))
+    if t_ref is not None and t_last:
+        pts.append((t_ref, int(t_last)))
+    pts = sorted(set(pts))
+    rates = []
+    for (b0, t0), (b1, t1) in zip(pts, pts[1:]):
+        sec = (b1 - b0).total_seconds()
+        if sec > 0 and t1 > t0:
+            rates.append((t1 - t0) / sec)
+    rates = rates[-RECENT_RATE_INTERVALS:]
+    if not rates:
+        return None
+    rates.sort()
+    k = len(rates)
+    return rates[k // 2] if k % 2 else (rates[k // 2 - 1] + rates[k // 2]) / 2.0
+
+
 def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
            data_stale_sec=DATA_STALE_SEC, lare_chain=None):
     """スキャン結果から Notion 列に対応する派生フィールドを作る."""
@@ -946,6 +1060,11 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
         # 遅れたぶんだけ heartbeat が古く見え、走っている run が stalled に化ける
         stale = (last is None) or (obs - last > timedelta(minutes=stale_minutes))
         d["state"] = "stalled" if stale else "running"
+        # Ctrl-Z 等で一時停止中なら heartbeat が止まっていても「実行中」のまま扱う。
+        # 再開すれば続きから進むので、止まった (stalled) と同じにすると枠が空いて見え、
+        # 同じ条件を二重に投入してしまう
+        if rec.get("proc_state") == "stopped":
+            d["state"] = "running"
     else:
         d["state"] = "unknown"
 
@@ -997,15 +1116,26 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
     d["rate"] = None            # step/sec
     d["remaining_sec"] = None
     d["eta"] = None
+    d["rate_source"] = None     # "recent" = 直近の区間 / "average" = 開始からの平均
+    d["paused"] = bool(rec.get("proc_state") == "stopped" and d["state"] == "running")
     t_ref = beat or stop
     if d["state"] == "running" and start and t_ref and t_last and t_max:
         elapsed = (t_ref - start).total_seconds()
         if elapsed > 0 and t_last > 0 and t_last < t_max:
-            rate = t_last / elapsed
+            # 直近の区間ペースを優先する。開始からの平均は、一時停止やスリープで
+            # 止まっていた時間まで含むので、終了予定が何日も先に出てしまう
+            rate = recent_rate(rec, t_ref, t_last)
+            d["rate_source"] = "recent" if rate else None
+            if not rate:
+                rate = t_last / elapsed
+                d["rate_source"] = "average"
             if rate > 0:
                 d["rate"] = rate
                 d["remaining_sec"] = (t_max - t_last) / rate
-                d["eta"] = t_ref + timedelta(seconds=d["remaining_sec"])
+                # 一時停止中は「いつ再開するか」が分からないので時刻は出さない
+                # (残り時間だけ出す。再開すればその時点から残り時間で終わる)
+                if not d["paused"]:
+                    d["eta"] = t_ref + timedelta(seconds=d["remaining_sec"])
     # map を必ず含める。入れないと 3agent 8M iql が map_5x4 / map_8x5 / map_aoba01 を
     # 1 条件に混ぜてしまい、「done seeds」が別マップ混在の一覧になる
     d["condition"] = "%sagent %s %sM | %s | %s | %s | %s" % (
@@ -1604,6 +1734,7 @@ def dashboard_data(rows, batches, errors, saved=None, cadence=None):
             "duration": d.get("duration"),
             "eta": d["eta"].isoformat() if d.get("eta") else None,
             "remaining_sec": d.get("remaining_sec"),
+            "paused": d.get("paused"),
             "last_seen": d["last_seen"].isoformat() if d.get("last_seen") else None,
             # 実際に終わった / 止まった時刻。last_seen は heartbeat 優先なので、
             # 「いつ完了したか」を出すには stop_time そのものが要る
@@ -1962,17 +2093,42 @@ def eval_model_stem(d):
     return "_".join(parts)
 
 
+# 評価用モデルのファイル名の形式。collect_config.yaml の `eval_naming` で切り替える。
+#   "template" (既定): テンプレートの LDRP (研究室配布版) の評価が読む形。
+#                      src/all_policy/policy.py が models/safe/{map}_{N}_{algo}.th を開くので、
+#                      seed 番号 0 はその名前、1 以降は _seed{i} を付けて並べる
+#   "ldrp":            この LDRP の評価 (policy.py の model_stem / resolve_model_path) が読む形。
+#                      {map}_{N}_{algo}[_{tag}][_{assign}][_dyn]_base_seed{i}.th
+# どちらでも「どの run を同じ条件として seed 番号を振るか」は eval_model_stem() で決める
+# (ファイル名の形式だけが変わる)。
+EVAL_NAMINGS = ("template", "ldrp")
+EVAL_NAMING = "template"
+
+
+def set_eval_naming(name):
+    """設定の eval_naming を反映する。未知の値は既定のまま警告する."""
+    global EVAL_NAMING
+    name = str(name or "template").strip().lower()
+    if name not in EVAL_NAMINGS:
+        sys.stderr.write("[config] unknown eval_naming %r; using 'template' (choose from %s)\n"
+                         % (name, ", ".join(EVAL_NAMINGS)))
+        name = "template"
+    EVAL_NAMING = name
+    return name
+
+
 def eval_model_filename(d, seed_index=None):
-    """評価側がそのまま読めるファイル名。
+    """評価側がそのまま読めるファイル名。形式は EVAL_NAMING で決まる.
 
     末尾の seed は **学習時の生 seed ではなく 0 始まりの通し番号**。
-    policy.py の resolve_model_path(stem, model_seed=0) が
-    "{stem}_seed{model_seed}.th" を探し、model_seed の既定が 0 だから。
-    生 seed (9 桁) を入れると test.py に --model-seed 113162076 と
-    打つことになり噛み合わない。生 seed は manifest.jsonl に残す。
+    評価側は model_seed=0 (= 番号 0) を既定で読むので、生 seed (9 桁) を入れると
+    噛み合わない。生 seed は manifest.jsonl に残す。
     """
     n = d.get("seed") if seed_index is None else seed_index
-    return "%s_seed%s.th" % (eval_model_stem(d), n)
+    if EVAL_NAMING == "ldrp":
+        return "%s_seed%s.th" % (eval_model_stem(d), n)
+    base = "%s_%s_%s" % (d.get("map"), d.get("agents"), d.get("algo"))
+    return (base + ".th") if str(n) == "0" else "%s_seed%s.th" % (base, n)
 
 
 def assign_seed_indexes(planned, repo_dir=None, conds=None, planned_only=True):
@@ -3777,12 +3933,14 @@ def quick_check(conf, hosts, cache_path, tail_bytes, timeout, stale, tag_map,
     if not fresh:
         return 0
 
-    # 軽い問い合わせでは repo / model を取らないので、キャッシュの値を残す
+    # 軽い問い合わせでは repo / model を取らないので、キャッシュの値を残す。
+    # 終了予定の記録点も derive() より先に引き継ぐ (直近ペースで予定を出すため)
     for r in fresh:
         old_rec = by_uid.get(r.get("uid")) or {}
         for k in ("repo", "model"):
             if not r.get(k) and old_rec.get(k):
                 r[k] = old_rec[k]
+        carry_progress_samples(r, old_rec)
 
     rows = [derive(r, stale, tag_map, lare_chain=conf.get("lare_chain"))
             for r in fresh]
@@ -3896,10 +4054,12 @@ def load_config(path):
         # ここで黙って {} を返すと、呼び出し側が「設定が無い」と判断して
         # ホスト定義ごと失われる (実測: ラベルが os.uname()[1] に化けて
         # 同じ run が二重にキャッシュへ入った)。落ちないが必ず知らせる
+        # 案内に特定の環境のパスを書かない (配布先ではパスが人ごとに違う)
         sys.stderr.write(
             "[error] PyYAML is missing, so %s cannot be read.\n"
-            "[error]   run with the conda python: "
-            "/opt/anaconda3/envs/ldrp/bin/python\n" % path)
+            "[error]   this python is %s. Run with a python that has PyYAML\n"
+            "[error]   (e.g. the conda env you train with), or: pip install pyyaml\n"
+            % (path, sys.executable))
         return {}
     return yaml.safe_load(text) or {}
 
@@ -3942,10 +4102,53 @@ def build_hosts(conf, args):
     return hosts
 
 
+# 終了予定を出すための「(heartbeat 時刻, t_env)」の記録点。収集のたびに 1 点ずつ増える
+PROGRESS_SAMPLES_MAX = 12       # 1 run あたり保持する点数 (15 分ごとの収集なら約 3 時間分)
+RECENT_RATE_INTERVALS = 6       # ペースを出すのに使う直近の区間数 (中央値を取る)
+
+
+def _progress_point(rec):
+    """このレコードが示す (heartbeat, t_env) の 1 点。どちらかが無ければ None."""
+    beat = (rec or {}).get("heartbeat")
+    t = (rec or {}).get("t_last")
+    if not beat or t in (None, ""):
+        return None
+    try:
+        return [str(beat), int(t)]
+    except (TypeError, ValueError):
+        return None
+
+
+def carry_progress_samples(new, old):
+    """古いレコードの記録点を新しいレコードへ引き継ぎ、今回の 1 点を足す.
+
+    終了予定を「開始からの平均ペース」で出すと、一時停止 (Ctrl-Z) やスリープで
+    止まっていた時間まで平均に入り、何日も先の予定になる (白で 5.5 時間 → 65 時間と
+    出ていた)。直近の区間のペースを使えるように、収集のたびに点を残しておく。
+    一時停止中は heartbeat も止まるので、止まっていた時間に点は増えない。
+    """
+    if new is None:
+        return new
+    pts = {}
+    for b, t in list((old or {}).get("progress_samples") or []) + \
+            list(new.get("progress_samples") or []):
+        pts[str(b)] = int(t)
+    for rec in (old, new):
+        pt = _progress_point(rec)
+        if pt:
+            pts[pt[0]] = pt[1]
+    if pts:
+        new["progress_samples"] = [[b, t] for b, t in sorted(pts.items())][-PROGRESS_SAMPLES_MAX:]
+    return new
+
+
 def dedupe(rows):
-    """同じ uid が複数回来たら最後の 1 件を残す."""
+    """同じ uid が複数回来たら最後の 1 件を残す (記録点は古い方から引き継ぐ)."""
     seen = {}
     for d in rows:
+        prev = seen.get(d["uid"])
+        if prev is not None and prev is not d:
+            carry_progress_samples(d, prev)
         seen[d["uid"]] = d
     return list(seen.values())
 
@@ -4201,6 +4404,7 @@ def main(argv=None):
                                   ".run_cache.jsonl")
 
     stale = args.stale_minutes or conf.get("stale_minutes") or 90
+    set_eval_naming(conf.get("eval_naming"))
     tail_bytes = args.tail_bytes or conf.get("tail_bytes") or 65536
     hosts = build_hosts(conf, args)
     if not hosts:

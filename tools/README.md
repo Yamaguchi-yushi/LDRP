@@ -22,7 +22,7 @@ Notion に seed と条件を手で書き写す作業を無くすためのツー�
 各マシンの sacred 出力を読んで「どの条件の seed が、どこまで学習したか」を 1 つの表にする。
 
 - **完遂チェック**: 設定した `t_max` まで到達したか (`OK` / `SHORT`)、途中で死んでいないか (`STALL` / `FAIL`) を判定
-- **終了予定時刻**: 実測ペースから残り時間と終了予定時刻を出す (`12h01m -> 09/01 03:40`)
+- **終了予定時刻**: 直近のペースから残り時間と終了予定時刻を出す (`12h01m -> 09/01 03:40`)。一時停止 (Ctrl-Z) 中は「⏸ 一時停止中」
 - **学習パラメータの保存**: `config.json` を全文保持し、条件としての同一性を `param_hash` で表す。
   同じ条件のはずの seed でパラメータが割れていたら警告する
 - **完了ポップアップ**: run が終わった / 落ちたときに macOS の通知を出す (`--notify`)
@@ -319,19 +319,36 @@ python tools/collect_runs.py --hosts local --machine GPU1 --repo ~/LDRP \
 
 ### 学習終了予定時刻 (eta 列)
 
-進行中の run について、**実測ペース**から残り時間と終了予定時刻を出す。
+進行中の run について、**直近のペース**から残り時間と終了予定時刻を出す (2026-09-28 変更)。
 
 ```text
-eta = heartbeat + (t_max - t_env) / (t_env / (heartbeat - start_time))
-                                     └ ここまでの平均 step/sec
+eta = heartbeat + (t_max - t_env) / 直近のペース
+直近のペース = 記録点どうしの区間ペース (step/sec) の、直近 6 区間の中央値
 ```
 
+- **記録点**: 収集のたびに run ごとに `(heartbeat, t_env)` を 1 点ずつ残す (キャッシュの
+  `progress_samples`、最大 12 点)。一時停止中は heartbeat も止まるので点が増えない
+- 以前は**開始からの平均ペース**を使っていたが、一時停止 (Ctrl-Z) やスリープで止まっていた時間まで
+  平均に入り、何日も先の予定になっていた (白で実際は約 5 時間のところを約 65 時間と表示)
+- 区間が 1 つも無いとき (初回の収集直後) だけ、開始からの平均ペースに戻す (`rate_source` が `average`)
+- 再開直後は一時停止をまたいだ区間が遅く出るが、中央値なので区間が増えるにつれ消える
 - 時刻は `run.json` の `start_time` と `heartbeat` を使う。どちらも sacred が書く UTC
   なので時計系が揃う (`cout.txt` の mtime はリモートの時計なので使わない)
 - **`RUN` の run にだけ出す**。停止した run のペースから作った予定時刻は誤解を招くので、
   `OK` / `STALL` / `FAIL` / `SHORT` では空欄になる
-- あくまで**開始からの平均ペース**での外挿。マシンの負荷が変われば当然ずれる
-  (GPU2 は load average 34 まで上がることがある)
+
+#### 一時停止 (Ctrl-Z) の検出
+
+一時停止すると heartbeat が止まるので、何もしないと 90 分後に `STALL` と区別できなくなる。
+各マシンの上で `ps` を見て、**学習プロセスの状態が `T` (stopped) なら一時停止中**と判定する。
+
+- sacred の `run.json` に pid は残らないので、**起動時刻と起動引数** (アルゴリズム・環境名・t_max) で
+  run とプロセスを結ぶ。起動時刻が 15 分以上ずれるプロセスは別の run とみなす
+- 一時停止中の run は **`RUN` のまま**扱う (枠が空いて見えると同じ条件を二重に投入してしまうため)。
+  終了予定の時刻は出さず、「⏸ 一時停止中 (再開すれば残り ◯)」と表示する
+- 判定は各マシンで動く走査の中で行うので、白・GPU (SSH) でそのまま効く。黒 / M2 は `git pull` が要る
+- `ps` は `LC_ALL=C` で呼ぶ (GPU の日本語ロケールで起動時刻の書式が変わるため)。
+  `/bin/sh -c python ...` のシェルは除き、python 本体の状態だけを見る
 
 `OK` の根拠は epymarl が `while t_env <= t_max` を抜けた直後に出す `Finished Training`
 ([src/epymarl/src/run.py](../src/epymarl/src/run.py))。GPU 機のように stdout をシェルで
@@ -803,3 +820,38 @@ drop モードでは ssh の代わりに共有フォルダを挟む。相手の�
                                         /<label>/models/<run>/path/agent.th
 [集約する Mac]  drop: true  <--  同じフォルダを読む
 ```
+
+
+---
+
+## 研究室への配布 (テンプレートの LDRP へ書き出す)
+
+他の人に使ってもらうときは、このディレクトリをそのまま渡さず **`export_tools.py` で書き出す**。
+自分専用のもの (設定・計画表・キャッシュ・現地作業の手順書・自分用の plist) は持っていかず、
+README と設定の見本は [dist/](dist/) の配布用に差し替わる。
+
+```bash
+git clone https://github.com/kaji-ou/LDRP.git ~/src/LDRP-template   # テンプレート
+python tools/export_tools.py ~/src/LDRP-template --dry-run           # 何を書くか確認
+python tools/export_tools.py ~/src/LDRP-template                     # 書き出す
+cd ~/src/LDRP-template && git status                                 # 確認してから自分で commit / push
+```
+
+- **書き出す前に、IP アドレス・ユーザー名付きの接続先・ホームのパス・token が混ざっていないか検査し、見つかれば止まる**。
+  配布先は他の人からも見えるため。`--check` で検査だけできる
+- 配布先の `.gitignore` に `tools/collect_config.yaml` / `tools/plans/` / キャッシュを足す
+- 配布先で手が入っているファイルは上書きしない (`--force` で上書き)
+
+配布版での違い (自分の環境は何も変わらない):
+
+| 項目 | 配布版 | 自分の環境 |
+|---|---|---|
+| 評価用モデルの名前 (`eval_naming`) | `template` = `{map}_{N}_{algo}.th` (テンプレートの評価が読む形) | `ldrp` (collect_config.yaml で指定) |
+| 定期実行の登録 | `setup_launchd.py` が、実行した python とリポジトリの場所から plist を作る | 既存の plist のまま |
+| README / 設定の見本 | [dist/README.md](dist/README.md) / [dist/collect_config.example.yaml](dist/collect_config.example.yaml) | このファイル |
+
+共有 GPU での注意: 一時停止の判定と train.py の実行予定は `ps -U <自分の uid>` で**自分のプロセスだけ**を見る。
+他のユーザーの学習を自分の run と取り違えないため。
+
+2026-09-28 にテンプレート (kaji-ou/LDRP) を展開して、書き出し → 収集 → 計画表 → ダッシュボード →
+モデル回収 (`map_8x5_5_qmix.th` で設置) → 共有フォルダ経由の収集まで通ることを確認済み。

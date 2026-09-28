@@ -92,7 +92,9 @@ class State(object):
     # --- 設定 -----------------------------------------------------------
     def conf(self):
         path = os.path.expanduser(self.args.config)
-        return CR.load_config(path) if os.path.exists(path) else {}
+        conf = CR.load_config(path) if os.path.exists(path) else {}
+        CR.set_eval_naming(conf.get("eval_naming"))    # 評価用モデル名の形式
+        return conf
 
     # --- 計画 -----------------------------------------------------------
     def plan_files(self):
@@ -403,22 +405,40 @@ class State(object):
         # マシンごとの「最後に何を終わらせたか」。実行中が 0 でも、直前に
         # 終わったのが 3 日前なら手が空いている = 投入すべき、と判断できる
         last = {}
+        nxt = {}        # マシンごとに「次に終わる予定の実行中 run」
+        paused = {}     # マシンごとの一時停止中 (Ctrl-Z) の run
         for r in d.get("runs") or []:
+            k = r.get("machine")
+            if r.get("state") == "running" and r.get("paused"):
+                paused.setdefault(k, []).append(r)
+            elif r.get("state") == "running" and r.get("eta"):
+                if k not in nxt or r["eta"] < nxt[k]["eta"]:
+                    nxt[k] = r
             if r.get("state") != "done" or not r.get("stop_at"):
                 continue
-            k = r.get("machine")
             if k not in last or r["stop_at"] > last[k]["stop_at"]:
                 last[k] = r
+        def what(r):
+            return "%sag %s %s" % (r.get("agents"), str(r.get("map") or "").replace("map_", ""),
+                                   r.get("algo"))
+
         machines = []
         for name, m in sorted((d.get("machines") or {}).items()):
             r = last.get(name)
+            e = nxt.get(name)
             machines.append({
                 "name": name, "running": m.get("running") or 0,
                 "age": m.get("data_age_sec"), "stale": bool(m.get("stale_data")),
                 "last_done": r.get("stop_at") if r else None,
-                "last_what": ("%sag %s %s" % (r.get("agents"),
-                                              str(r.get("map") or "").replace("map_", ""),
-                                              r.get("algo"))) if r else None,
+                "last_what": what(r) if r else None,
+                # 次の終了予定。実測ペースから出した見込みなので、情報が古いホストでは当てにならない
+                "next_eta": e.get("eta") if e else None,
+                "next_what": what(e) if e else None,
+                # 一時停止中の本数と、再開したときに最も早く終わるものの残り時間
+                "paused": len(paused.get(name, [])),
+                "paused_remaining": min((x.get("remaining_sec") for x in paused.get(name, [])
+                                         if x.get("remaining_sec") is not None), default=None),
+                "paused_what": what(paused[name][0]) if paused.get(name) else None,
             })
         return {"conditions": len(plan), "full": full, "part": part, "todo": todo,
                 "need": need, "running": running, "machines": machines,
