@@ -27,6 +27,10 @@ HEAD_RE = re.compile(
     r"^\s{0,3}#{1,6}\s+(?P<n>\d+)\s*agent\s*(?P<map>[A-Za-z0-9_]*?)\s*"
     r"(?P<t>[\d.]+)\s*M\s*(?:[（(][^)）]*[)）]\s*)?$", re.I)
 MAP_HINT_RE = re.compile(r"<!--\s*map:\s*([A-Za-z0-9_]+)\s*-->", re.I)
+# ファイル単位の既定値。`<!-- seeds: 1 -->` = 1 条件あたりの枠数 (既定 DEFAULT_SEEDS)、
+# `<!-- reassign: F -->` = reassign 列が空の条件をこの値として扱う (空のままだと「問わない」)
+SEEDS_HINT_RE = re.compile(r"<!--\s*seeds:\s*(\d+)\s*-->", re.I)
+REASSIGN_HINT_RE = re.compile(r"<!--\s*reassign:\s*([A-Za-z]+)\s*-->", re.I)
 # 章の前に置かれた裸のマップ名 (メモでは "aoba00" / "8x5" とだけ書かれている)
 BARE_MAP_RE = re.compile(r"^\s*(?:map_)?([A-Za-z0-9][A-Za-z0-9_]{0,19})\s*$")
 ARROW_RE = re.compile(r"\s*(?:→|->|=>)\s*")
@@ -111,6 +115,8 @@ def parse_plan(path):
     conds = []
     section = None            # (agents, map, t_max_m)
     default_map = None
+    want_seeds = DEFAULT_SEEDS
+    default_reassign = None
     cols = None
     cur = None
 
@@ -121,6 +127,14 @@ def parse_plan(path):
             hint = MAP_HINT_RE.search(line)
             if hint:
                 default_map = norm_map(hint.group(1))
+                continue
+            hint = SEEDS_HINT_RE.search(line)
+            if hint:
+                want_seeds = max(1, int(hint.group(1)))
+                continue
+            hint = REASSIGN_HINT_RE.search(line)
+            if hint:
+                default_reassign = norm_reassign(hint.group(1))
                 continue
 
             h = HEAD_RE.match(line)
@@ -171,7 +185,9 @@ def parse_plan(path):
                        "algo": norm_algo(algo),
                        "task_arrival": get("task arrival") or None,
                        "task_assign": norm_assign(get("task assign")),
-                       "reassign": norm_reassign(reas_raw),
+                       "reassign": (norm_reassign(reas_raw)
+                                    if norm_reassign(reas_raw) is not None
+                                    else default_reassign),
                        "dynamic": norm_flag(get("dynamic")),
                        "seeds": [], "source_line": lineno}
                 conds.append(cur)
@@ -185,7 +201,7 @@ def parse_plan(path):
 
     for c in conds:
         # 表の行数が枠数。ただし 5 seed 運用なので、少なければ 5 まで埋める
-        c["want"] = max(len(c["seeds"]), DEFAULT_SEEDS)
+        c["want"] = max(len(c["seeds"]), want_seeds)
         while len(c["seeds"]) < c["want"]:
             c["seeds"].append({"seed": None, "machine": None, "reassign": None})
     return conds

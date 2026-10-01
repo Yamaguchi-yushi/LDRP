@@ -198,6 +198,20 @@ def param_fields(cfg_full, env_full):
     if env.get("randomize_task_arrival"):
         for k in ("task_arrival", "task_density"):
             env.pop(k, None)
+    # max_active_agents は「開始時に稼働台数を引くときの上限」で、env が台数 N
+    # (環境名の drp_safe-{N}agent) に丸める。未指定 (None) も N 以上も挙動は同じ
+    # (drp_env.py の reset: hi = agent_num if max is None else min(agent_num, max))。
+    # 同じ値として扱わないと、行を消した run と max=N を書いた run が別条件に見える。
+    # N 未満のときだけ本当に条件が違うので残す
+    if "max_active_agents" in env:
+        m = ENV_KEY_RE.search(str(env.get("key") or ""))
+        n = int(m.group(2)) if m else None
+        mx = env.get("max_active_agents")
+        try:
+            if mx is None or (n is not None and int(mx) >= n):
+                env.pop("max_active_agents", None)
+        except (TypeError, ValueError):
+            pass
     # None / False は「キーが無い」と同一視する。config のスキーマは版ごとに増えており、
     # 古い run にはキー自体が存在しない。新設フラグの既定は False / None なので、
     # これを潰さないと「後から足したキーの有無」だけで差が出る。
@@ -469,7 +483,7 @@ def scan_run_dir(run_dir, machine, root_tag, tail_bytes, repo=None, model_index=
                            (cfg.get("env_args") or {}).get("key"))
 
     host = run.get("host") or {}
-    return {
+    rec = {
         "repo": repo,
         "model": model,
         "uid": "%s:%s/%s/%s/%s" % (machine, root_tag, algo_dir, env_dir, run_id),
@@ -492,10 +506,16 @@ def scan_run_dir(run_dir, machine, root_tag, tail_bytes, repo=None, model_index=
         "cfg": cfg_full,
         "env": env_full,
         "param_hash": param_hash(cfg_full, env_full),
-        # 学習プロセスの状態。"stopped" = Ctrl-Z 等で一時停止中 / "running" / None = 不明
-        "proc_state": (match_training_proc(cfg_full, env_full, run.get("start_time"))
-                       if run.get("status") == "RUNNING" else None),
     }
+    # 学習プロセスの状態。"stopped" = Ctrl-Z 等で一時停止中 / "running" / None = 不明
+    # train.py の予約から起動されていれば、その何本目か (batch_pos / batch_total) も付ける
+    proc = (find_training_proc(cfg_full, env_full, run.get("start_time"))
+            if run.get("status") == "RUNNING" else None)
+    rec["proc_state"] = (None if proc is None else
+                         "stopped" if proc["stat"].startswith("T") else "running")
+    pos = batch_position(proc)
+    rec["batch_pos"], rec["batch_total"], rec["batch_pid"] = pos if pos else (None, None, None)
+    return rec
 
 
 def root_tag_of_run(run_dir):
@@ -509,7 +529,7 @@ def root_tag_of_run(run_dir):
 # Ctrl-Z で一時停止すると sacred の heartbeat も止まるので、90 分後には「停止 (stalled)」
 # と区別できなくなる。ps の状態 (T = stopped) を見て「一時停止中」と判定する。
 # sacred の run.json に pid は残らないので、起動時刻と起動引数で run とプロセスを結ぶ
-_PROC_CACHE = {"t": 0.0, "procs": None}
+_PROC_CACHE = {"t": 0.0, "procs": None, "ppid": {}}
 PS_MAIN_RE = re.compile(r"^(?:\S*/)?python[0-9.]*\s+(?:-\S+\s+)*\S*main\.py\b")
 
 
@@ -523,32 +543,92 @@ def _training_procs(ttl=30.0):
         # 日本語ロケールだと lstart の月・曜日が日本語になるので英語に固定する
         # 共有 GPU では他のユーザーも学習を回しているので、自分のプロセスだけを見る
         # (見ないと他人の run を自分の一時停止と取り違える。GPU1 で他ユーザーの main.py 6 本を確認)
-        out = subprocess.check_output(["ps", "-U", str(os.getuid()), "-o", "pid=,stat=,lstart=,args="],
+        out = subprocess.check_output(["ps", "-U", str(os.getuid()), "-o", "pid=,ppid=,stat=,lstart=,args="],
                                       stderr=subprocess.DEVNULL,
                                       env=dict(os.environ, LC_ALL="C", LANG="C"))
     except (OSError, subprocess.CalledProcessError):
         out = b""
+    ppid_of = {}                  # 全プロセスの pid -> 親 pid (train.py までたどるため)
     for line in out.decode("utf-8", "replace").splitlines():
-        tok = line.split(None, 7)
-        if len(tok) < 8:
+        tok = line.split(None, 8)
+        if len(tok) < 9:
             continue
-        pid, stat, args = tok[0], tok[1], tok[7]
+        pid, ppid, stat, args = tok[0], tok[1], tok[2], tok[8]
+        ppid_of[pid] = ppid
         # /bin/sh -c python ... のシェルは除き、python 本体だけを見る
         if not PS_MAIN_RE.search(args):
             continue
         try:
-            started = time.mktime(time.strptime(" ".join(tok[2:7]), "%a %b %d %H:%M:%S %Y"))
+            started = time.mktime(time.strptime(" ".join(tok[3:8]), "%a %b %d %H:%M:%S %Y"))
         except ValueError:
             started = None
         procs.append({"pid": pid, "stat": stat, "start": started, "args": args})
-    _PROC_CACHE.update(t=now, procs=procs)
+    _PROC_CACHE.update(t=now, procs=procs, ppid=ppid_of)
     return procs
 
 
+def _ancestors(pid, depth=4):
+    """pid 自身と、その親を depth 代までたどった pid の列 (文字列)."""
+    ppid_of = _PROC_CACHE.get("ppid") or {}
+    out, cur = [], str(pid)
+    for _ in range(depth + 1):
+        if not cur or cur in out or cur in ("0", "1"):
+            break
+        out.append(cur)
+        cur = ppid_of.get(cur)
+    return out
+
+
+def batch_position(proc):
+    """学習プロセスが train.py の予約の何本目かを返す. (本目, 総本数, バッチ pid) か None.
+
+    main.py の親 (shell=True なら /bin/sh -c、その親) をたどり、~/.ldrp/batch_<pid>.json
+    を書いた train.py を探す。
+    - 予約ファイルに "pids" (起動順の Popen の pid) があれば、その並びの位置がそのまま答え
+    - 無ければ (古い train.py)、起動済み本数 started から「自分より後に起動して
+      まだ動いている同じバッチの run」の数を引く。後から起動した run が先に終わって
+      いると数え落とすので、その場合だけ 1 つ大きく出る
+    """
+    if not proc:
+        return None
+    chain = _ancestors(proc["pid"])
+    d = os.path.expanduser(BATCH_DIR)
+    for anc in chain[1:]:
+        info = _read_json(os.path.join(d, "batch_%s.json" % anc))
+        if not info or not info.get("total"):
+            continue
+        total = int(info["total"])
+        pids = [str(x) for x in info.get("pids") or []]
+        for c in chain[:chain.index(anc)]:
+            if c in pids:
+                return pids.index(c) + 1, total, int(anc)
+        started = int(info.get("started") or 0)
+        if not started:
+            return None
+        later = 0
+        for p in _training_procs():
+            if p is proc or p["start"] is None or proc["start"] is None:
+                continue
+            if anc in _ancestors(p["pid"])[1:] and p["start"] > proc["start"]:
+                later += 1
+        return max(1, started - later), total, int(anc)
+    return None
+
+
 def match_training_proc(cfg, env, start_time):
-    """sacred の run に対応する学習プロセスを探し、その状態を返す.
+    """sacred の run に対応する学習プロセスの状態を返す.
 
     "stopped" = 一時停止中 (ps の STAT が T) / "running" / None = 見つからない。
+    """
+    best = find_training_proc(cfg, env, start_time)
+    if best is None:
+        return None
+    return "stopped" if best["stat"].startswith("T") else "running"
+
+
+def find_training_proc(cfg, env, start_time):
+    """sacred の run に対応する学習プロセス (_training_procs の 1 要素) を探す. 無ければ None.
+
     起動引数 (アルゴリズム・環境名・t_max) が合うプロセスのうち、起動時刻が sacred の
     start_time に最も近いものを採る。同じ条件を同時に回していても取り違えない。
     """
@@ -583,7 +663,7 @@ def match_training_proc(cfg, env, start_time):
             if abs(best["start"] - t0) > 900:
                 # 起動時刻が 15 分以上ずれている = 別の run のプロセス。当て推量はしない
                 return None
-    return "stopped" if best["stat"].startswith("T") else "running"
+    return best
 
 
 BATCH_DIR = "~/.ldrp"
@@ -929,11 +1009,16 @@ def norm_chain(text):
 
 
 def recent_rate(rec, t_ref, t_last):
-    """記録点から直近のペース (step/sec) を出す。区間が 1 つも無ければ None.
+    """記録点から直近 15 分ぶんのペース (step/sec) を出す。区間が 1 つも無ければ None.
 
-    隣り合う 2 点の区間ごとにペースを出し、直近 RECENT_RATE_INTERVALS 区間の**中央値**を取る。
-    一時停止をまたいだ区間は遅く出るが、中央値なら 1〜2 区間は無視できる。
-    ステップが進んでいない区間 (heartbeat だけ進んだ) は捨てる。
+    最新の点から古い方へ区間をたどり、合計が RATE_WINDOW_SEC (15 分) に届くまで
+    ステップ数と秒数を足し合わせて割る。
+    - 2 分おきの quick-check だと 1 区間が短く、t_env は log 間隔 (5 万 step) 刻みでしか
+      進まないので、区間 1 つずつのペースは 0 と 2 倍を行き来する。15 分束ねればならされる
+    - 学習マシン側が止まっていた (蓋を閉じた / Ctrl-Z) 区間は heartbeat が飛ぶので、
+      「長くて (PAUSE_GAP_SEC 以上) 遅い (普段のペースの半分未満)」区間として飛ばし、
+      その前の区間で 15 分を埋める。収集側 (白) が閉じていただけの長い区間は
+      ペースが普段どおりなので飛ばさない
     """
     pts = []
     for b, t in rec.get("progress_samples") or []:
@@ -943,17 +1028,28 @@ def recent_rate(rec, t_ref, t_last):
     if t_ref is not None and t_last:
         pts.append((t_ref, int(t_last)))
     pts = sorted(set(pts))
-    rates = []
+    iv = []                                   # (秒, ステップ) 古い順
     for (b0, t0), (b1, t1) in zip(pts, pts[1:]):
         sec = (b1 - b0).total_seconds()
-        if sec > 0 and t1 > t0:
-            rates.append((t1 - t0) / sec)
-    rates = rates[-RECENT_RATE_INTERVALS:]
-    if not rates:
+        if sec > 0 and t1 >= t0:
+            iv.append((sec, t1 - t0))
+    if not iv:
         return None
-    rates.sort()
-    k = len(rates)
-    return rates[k // 2] if k % 2 else (rates[k // 2 - 1] + rates[k // 2]) / 2.0
+    # 普段のペース = 短い区間をまとめたペース。短い区間が無ければ停止の判定はしない
+    short = [(s, n) for s, n in iv if s < PAUSE_GAP_SEC]
+    s_sum = sum(s for s, _n in short)
+    base = (sum(n for _s, n in short) / s_sum) if s_sum > 0 else None
+    acc_sec = acc_steps = 0
+    for sec, n in reversed(iv):
+        if base and sec >= PAUSE_GAP_SEC and n / sec < 0.5 * base:
+            continue                          # 学習マシンが止まっていた区間
+        acc_sec += sec
+        acc_steps += n
+        if acc_sec >= RATE_WINDOW_SEC:
+            break
+    if acc_sec <= 0 or acc_steps <= 0:
+        return None
+    return acc_steps / acc_sec
 
 
 def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
@@ -1141,6 +1237,11 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
     d["condition"] = "%sagent %s %sM | %s | %s | %s | %s" % (
         d["agents"], d["map"], d["group_m"], d["algo"], d["setting"],
         d["task_arrival"], d["task_assign"] or "-")
+    # 再割当ありは別条件。入れないと、再割当なしで 5 seed そろった条件に
+    # 再割当ありの run が混ざり、params✗ (同じ条件なのに設定が違う) の判定で
+    # どちらかが少数派扱いになる。なしのときは何も足さない (既存の条件名と互換)
+    if d["reassign"]:
+        d["condition"] += " | reassign"
     return d
 
 
@@ -1735,6 +1836,8 @@ def dashboard_data(rows, batches, errors, saved=None, cadence=None):
             "eta": d["eta"].isoformat() if d.get("eta") else None,
             "remaining_sec": d.get("remaining_sec"),
             "paused": d.get("paused"),
+            # train.py の予約の何本目か (例: 2 / 5)。予約から起動していなければ None
+            "batch_pos": d.get("batch_pos"), "batch_total": d.get("batch_total"),
             "last_seen": d["last_seen"].isoformat() if d.get("last_seen") else None,
             # 実際に終わった / 止まった時刻。last_seen は heartbeat 優先なので、
             # 「いつ完了したか」を出すには stop_time そのものが要る
@@ -2074,7 +2177,7 @@ def eval_model_stem(d):
       + dynamic                           84 通り (衝突 0)  <- これ
     入れない軸と理由:
       task_arrival  計画内は "bernoulli, mmpp" の 1 種しかない
-      reassign      今回の計画から除外。枠 (_base) は残してある
+      reassign      末尾の reassign_tag で区別する (再割当ありで学習 = reassign / なし = base)
       LaRe 系列     map + N が系列を一意に決めるので method_tag で足りる
                     (計画外の系列は manifest.jsonl 側で判別する)
       t_max         map + N から決まる
@@ -2089,7 +2192,9 @@ def eval_model_stem(d):
         parts.append(assign.lower())
     if d.get("dynamic_agents"):
         parts.append("dyn")
-    parts.append("base")                        # reassign_tag
+    # reassign_tag。再割当ありで学習した run は "reassign" にして、再割当なしの
+    # モデル (…_base_seedK.th) を上書きしないようにする (test.py の引数 reassign で読み分ける)
+    parts.append("reassign" if d.get("reassign") else "base")
     return "_".join(parts)
 
 
@@ -2234,6 +2339,19 @@ def check_seed_order(planned, conds, seed_idx):
 
 
 SEEN_PATH = "tools/.host_seen.json"
+
+# ダッシュボードで「5 seed に数えない」にした run。{uid: 除外した時刻}。
+# tools/dashboard/app.py の EXCLUDE_PATH と同じファイル (書くのはあちら、読むのはこちら)。
+# launchd から呼ばれても場所がずれないよう、このファイルの場所から決める
+EXCLUDE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".run_excluded.json")
+
+
+def load_excluded(path=EXCLUDE_PATH):
+    try:
+        with open(path, "r") as f:
+            return json.load(f) or {}
+    except (IOError, OSError, ValueError):
+        return {}
 SEEN_KEEP = 40
 
 
@@ -2331,12 +2449,21 @@ def load_saved_models(repo_dir):
     return out
 
 
-def load_seed_index(repo_dir):
+def load_seed_index(repo_dir, excluded=None):
     """manifest.jsonl から stem -> {生 seed: 通し番号} を復元する。
 
     **一度振った番号は変えない**。評価スクリプトの --model-seed も論文の表も
     その番号を指しているので、後から詰め直すと過去の記録とずれる。
+
+    ただし**ダッシュボードで除外した run の番号は空き番号として返す**。
+    除外した run は使わないので、その番号 (= 計画表の行) を回し直した run に
+    引き継がせる。こうすると評価用のモデル (…_seed3.th) も評価ログ
+    (…_seed3.txt) も同じ名前で上書きされ、集計に古い結果が残らない。
+    除外していない run の番号は動かないので、上の原則とは矛盾しない。
+    excluded を渡さなければ EXCLUDE_PATH を読む。
     """
+    if excluded is None:
+        excluded = load_excluded()
     table = {}
     path = os.path.join(repo_dir, "manifest.jsonl")
     if not os.path.exists(path):
@@ -2353,6 +2480,8 @@ def load_seed_index(repo_dir):
             stem, idx = rec.get("eval_stem"), rec.get("seed_index")
             if stem is None or idx is None:
                 continue
+            if rec.get("uid") in excluded:
+                continue                  # この番号は空き扱い (回し直した run が入る)
             table.setdefault(stem, {})[str(rec.get("seed"))] = int(idx)
     return table
 
@@ -3995,7 +4124,7 @@ NOTIFY_PROBLEM_STATES = ("failed", "stalled", "short")
 
 
 def one_line(d):
-    return "seed %s @%s (%sagent %s %sM %s)" % (
+    return "seed %s @%s (%s台 %s %sM %s)" % (
         d.get("seed"), d.get("machine"), d.get("agents"), d.get("map"),
         d.get("group_m"), d.get("algo"))
 
@@ -4021,14 +4150,16 @@ def notify_transitions(rows, prev_states, max_lines=3):
     def summary(items):
         head = [one_line(d) for d in items[:max_lines]]
         if len(items) > max_lines:
-            head.append("+%d more" % (len(items) - max_lines))
+            head.append("他 %d 件" % (len(items) - max_lines))
         return " / ".join(head)
 
+    # デスクトップ通知は自分だけが見るものなので日本語で出す
+    # (CLAUDE.md の「出力は英語」はログ・例外・CLI ヘルプが対象)
     if finished:
-        notify("LDRP", "Training finished (%d)" % len(finished),
+        notify("LDRP", "学習が終了しました (%d 件)" % len(finished),
                summary(finished), sound="Glass")
     if problems:
-        notify("LDRP", "Runs need attention (%d)" % len(problems),
+        notify("LDRP", "要確認の run があります (%d 件)" % len(problems),
                summary(problems), sound="Basso")
     return len(finished) + len(problems)
 
@@ -4103,8 +4234,11 @@ def build_hosts(conf, args):
 
 
 # 終了予定を出すための「(heartbeat 時刻, t_env)」の記録点。収集のたびに 1 点ずつ増える
-PROGRESS_SAMPLES_MAX = 12       # 1 run あたり保持する点数 (15 分ごとの収集なら約 3 時間分)
-RECENT_RATE_INTERVALS = 6       # ペースを出すのに使う直近の区間数 (中央値を取る)
+PROGRESS_SAMPLES_MAX = 120      # 1 run あたり保持する点数の上限 (2 分おきの quick-check で約 4 時間分)
+PROGRESS_SAMPLES_KEEP_SEC = 3 * 3600   # 最新の点からこれより古い点は捨てる (heartbeat 基準)
+PROGRESS_SAMPLES_MIN = 12       # ただし直近のこの点数は古くても残す (停止より前の区間で 15 分を埋めるため)
+RATE_WINDOW_SEC = 15 * 60       # 終了予定のペースを出す区間の長さ
+PAUSE_GAP_SEC = 30 * 60         # この長さ以上で遅い区間は「学習マシンが止まっていた」とみなす
 
 
 def _progress_point(rec):
@@ -4138,7 +4272,15 @@ def carry_progress_samples(new, old):
         if pt:
             pts[pt[0]] = pt[1]
     if pts:
-        new["progress_samples"] = [[b, t] for b, t in sorted(pts.items())][-PROGRESS_SAMPLES_MAX:]
+        seq = [[b, t] for b, t in sorted(pts.items())][-PROGRESS_SAMPLES_MAX:]
+        # heartbeat 基準で古い点を捨てる (壁時計ではないので、停止中に点が消えることはない)
+        newest = parse_dt(seq[-1][0])
+        if newest is not None:
+            cut = newest - timedelta(seconds=PROGRESS_SAMPLES_KEEP_SEC)
+            keep = [p for p in seq[:-PROGRESS_SAMPLES_MIN]
+                    if (parse_dt(p[0]) or newest) >= cut]
+            seq = keep + seq[-PROGRESS_SAMPLES_MIN:]
+        new["progress_samples"] = seq
     return new
 
 
@@ -4561,7 +4703,14 @@ def main(argv=None):
 
     if args.fetch_models or args.fetch_dry_run:
         want = set(x.strip() for x in (args.fetch_state or "done").split(",") if x.strip())
-        targets = [d for d in rows if d["state"] in want]
+        # 除外した run は取ってこない。ここで外せば保管 (publish)・評価用フォルダへの
+        # 配置 (install)・共有フォルダの後始末 (purge) もすべて対象から外れる
+        excl = load_excluded()
+        targets = [d for d in rows if d["state"] in want and d["uid"] not in excl]
+        n_skip = sum(1 for d in rows if d["state"] in want and d["uid"] in excl)
+        if n_skip:
+            sys.stderr.write("[fetch] skipping %d excluded run(s) listed in %s\n"
+                             % (n_skip, EXCLUDE_PATH))
         planned, _n = fetch_models(
             hosts, targets, args.fetch_models or "models_inbox",
             what=args.fetch_what, with_optimizer=args.fetch_optimizer,

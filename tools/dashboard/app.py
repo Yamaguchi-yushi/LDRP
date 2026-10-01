@@ -47,6 +47,149 @@ ALGO_ORDER = ("qmix", "mappo", "mat", "mat_dec", "qplex", "iql", "vdn", "transf_
 # 「回し直しが要る」ので枠を占めさせない (占めると未実行の数が実態より減る)
 SLOT_STATES = ("done", "running")
 
+# 「要確認」に出す状態。collect_runs.py の通知と同じ集合にしておく
+# (通知で知らせたものが画面にも残る = 見落としの経路を 1 本にする)
+ATTENTION_STATES = ("failed", "stalled", "short")
+
+# OK を押した run を覚えておくファイル。tools/.host_seen.json と同じ置き方
+ACK_PATH = os.path.join(TOOLS, ".acked_runs.json")
+
+# 手で「5 seed に数えない」にした run。{uid: 除外した時刻}。
+# 報酬の計算式を変えたときなど、config に残らない違いで使えなくなった run を
+# 本数・多数決・設定の差分・全体比較のすべてから外す (表示は残して取り消せる)
+EXCLUDE_PATH = os.path.join(TOOLS, ".run_excluded.json")
+# 除外した run の評価用モデルに付ける印。run.py の model_seeds="auto" は
+# <stem>_seed{K}.th にしか一致しないので、これを付ければ評価の対象から外れる
+EXCLUDED_SUFFIX = ".excluded"
+
+# seed ごとの手書きメモ。{uid: "本文"}。run が消えない限り残す
+NOTE_PATH = os.path.join(TOOLS, ".run_notes.json")
+NOTE_MAX = 300      # 表の 1 列に収まる長さ。超える分は切る
+
+# --- 全体比較 (条件をまたいで設定を比べる) ---------------------------------
+# 条件内の多数決 (collect_runs.odd_param_runs) は、ある条件の 5 seed が**揃って**
+# 古い設定だと何も言えない。表に載っている run 同士を条件をまたいで比べて、
+# その穴を埋める。
+#
+# 比べないキー = 条件そのものを決めるもの (条件ごとに違って当然):
+#   map / 台数 (env.key), t_max, algo (cfg.name), seed, LaRe 設定 (setting 列),
+#   タスク到着の方式 (task arrival 列), 割当学習 (task assign 列), 動的台数 (dynamic 列)
+GLOBAL_SKIP_KEYS = frozenset((
+    "env.key", "cfg.t_max", "cfg.name", "cfg.env_args", "cfg.seed", "env.seed",
+    "env.task_arrival", "env.randomize_task_arrival",
+    "env.use_lare_path", "env.use_lare_path_training",
+    "env.use_pretrained_lare_path", "env.pretrained_lare_path_model_name",
+    "env.use_finetuning_lare_path", "env.finetuning_lare_path_model_name",
+    "cfg.train_task_assigner", "env.use_dynamic_agents",
+))
+GLOBAL_MIN_GROUP = 3    # 比べる相手がこれ未満なら多数派を決めない
+GLOBAL_MAJORITY = 0.5   # 多数派とみなす割合 (これ未満 = 意図的に振っているキー)
+# 「この差は問題ない」と判断したものを覚えておくファイル
+DISMISS_PATH = os.path.join(TOOLS, ".param_dismissed.json")
+
+
+def _norm(v):
+    return json.dumps(v, sort_keys=True, default=str)
+
+
+def _raw_param(d, k):
+    """表示用に生の値を引く.
+
+    param_fields は False / None を「キーが無い」に潰す (ハッシュを安定させるため)。
+    判定はそちらに合わせるが、表示で null と出すと use_rnn=False が「記録なし」に
+    見えてしまうので、画面には config に書かれていた値そのものを出す。
+    """
+    pre, key = k.split(".", 1)
+    src = (d.get("cfg") or {}) if pre == "cfg" else (d.get("env") or {})
+    return src.get(key)
+
+
+def dismiss_key(cond, key, actual):
+    """確認済みにする鍵. 値まで入れておけば、別の値に変わったとき再び出る."""
+    return "%s|%s|%s" % (cond, key, _norm(actual))
+
+
+def global_param_diff(rows):
+    """表に載っている run 同士で、条件をまたいで設定を比べる.
+
+    **同じ algo・同じ dynamic 設定の run はハイパーパラメータと env 設定が揃って
+    いるはず**、という前提でキーごとに多数派の値を決め、そこから外れている条件を返す。
+    algo をまたがないのは、mappo と qmix で lr が違うのは設計どおりだから。
+    dynamic で分けるのは、動的台数の run にしか無いキー (min_active_agents など) が
+    あるから。
+
+    返り値: {condition: [{key, expected, actual, n_this, n_major, n_group}, ...]}
+    """
+    from collections import Counter, defaultdict
+    groups = defaultdict(list)
+    for d in rows:
+        if d.get("state") in ("done", "running") and d.get("cfg"):
+            groups[(d.get("algo"), bool(d.get("dynamic_agents")))].append(d)
+    out = defaultdict(list)
+    for ds in groups.values():
+        if len(ds) < GLOBAL_MIN_GROUP:
+            continue
+        fields = [CR.param_fields(d.get("cfg"), d.get("env")) for d in ds]
+        keys = set().union(*fields) - GLOBAL_SKIP_KEYS - set(CR.HASH_IGNORE_FIELDS)
+        for k in sorted(keys):
+            vals = [_norm(f.get(k)) for f in fields]
+            count = Counter(vals)
+            if len(count) < 2:
+                continue
+            major, n_major = count.most_common(1)[0]
+            if n_major < len(ds) * GLOBAL_MAJORITY:
+                continue
+            ref = ds[vals.index(major)]
+            off = defaultdict(list)
+            for d, v in zip(ds, vals):
+                if v != major:
+                    off[(d["condition"], v)].append(d)
+            for (cond, _v), xs in off.items():
+                out[cond].append({
+                    "key": k,
+                    "expected": _raw_param(ref, k),
+                    "actual": _raw_param(xs[0], k),
+                    "n_this": len(xs), "n_major": n_major, "n_group": len(ds),
+                })
+    return out
+
+
+def ack_key(r):
+    """確認済みかどうかを見分ける鍵.
+
+    uid だけにすると、同じ run を回し直して**また落ちた**ときに前回の OK が
+    効いたままになり、二度目の失敗に気づけない。停止時刻まで入れておけば
+    新しい失敗は別物として必ず出てくる。
+    """
+    return "%s|%s|%s" % (r.get("uid"), r.get("state"),
+                         r.get("stop_at") or r.get("last_seen") or "")
+
+
+def load_json(path):
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (IOError, OSError, ValueError):
+        return {}
+
+
+def save_json(obj, path):
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+    except (IOError, OSError) as e:
+        sys.stderr.write("[warn] could not save %s: %s\n" % (path, e))
+
+
+def load_acks(path=ACK_PATH):
+    return load_json(path)
+
+
+def save_acks(acks, path=ACK_PATH):
+    save_json(acks, path)
+
 
 def _rank(seq, v):
     try:
@@ -149,7 +292,7 @@ class State(object):
                     break
         return out
 
-    def plan_view(self, rows, shaped):
+    def plan_view(self, rows, shaped, excl=None):
         """**表は計画から作る**。実績はそこに埋めていく.
 
         計画に無い run は conditions 表には出さない (実行中セクションには出る)。
@@ -167,11 +310,20 @@ class State(object):
             sys.stderr.write("[plan] %s: %s\n" % (type(e).__name__, e))
             return [], set()
 
+        excl = excl or {}
         used = set()
         out = []
         # パラメータが多数派とずれている run。印を付ける判断に使う
         odd_uids = set(d["uid"] for d in CR.odd_param_runs(rows))
         pending = self.pending_by_cond(conds)
+        # seed -> その seed を表に明記している条件の添字。別の計画 (例: AAMAS) の表に
+        # seed が書いてある run は、その計画のもの。1 seed だけ借りている計画
+        # (例: plan_reassign.md) の枠の下に「余分な完了 run *」として並べない
+        written = {}
+        for ci, c in enumerate(conds):
+            for sl in c["seeds"]:
+                if sl.get("seed"):
+                    written.setdefault(str(sl["seed"]), []).append(ci)
         for ci, c in enumerate(conds):
             hit = [d for d in rows if PLAN.matches(c, d)]
             by_seed = {}
@@ -184,9 +336,15 @@ class State(object):
                 sd = str(sl["seed"]) if sl["seed"] else None
                 run = None
                 if sd and by_seed.get(sd):
-                    d = by_seed[sd].pop(0)
-                    used.add(d["uid"])
-                    run = shaped.get(d["uid"])
+                    # 除外した run では枠を埋めない。同じ seed で回し直した run が
+                    # あればそちらを入れ、無ければ枠は空 (= 未実行) のまま。
+                    # 除外した run は by_seed に残るので、下の leftover で枠の下に出る
+                    cands = by_seed[sd]
+                    d = next((x for x in cands if x["uid"] not in excl), None)
+                    if d is not None:
+                        cands.remove(d)
+                        used.add(d["uid"])
+                        run = shaped.get(d["uid"])
                 slots.append({"seed": sd, "machine": sl.get("machine"),
                               "reassign": sl.get("reassign"), "run": run})
                 if sd is None:
@@ -205,17 +363,25 @@ class State(object):
             # t_max は別の欄に既に出ているので、ここで黄色にするのは「表に 5 seed
             # 書いてあるのに、さらに別の seed が回っている」場合 (取り違えか二重実行)。
             full = sum(1 for sl in c["seeds"] if sl.get("seed")) >= c["want"]
+            planned = set(str(sl["seed"]) for sl in c["seeds"] if sl.get("seed"))
             extra = []
             for d in leftover:
                 used.add(d["uid"])
+                if full and any(cj != ci and PLAN.matches(conds[cj], d)
+                                for cj in written.get(str(d.get("seed")), [])):
+                    continue              # 別の計画の表に載っている run
+                gone = d["uid"] in excl
                 row = {"seed": str(d.get("seed")), "machine": d.get("machine"),
                        "run": shaped.get(d["uid"]),
-                       "unplanned_seed": True,       # 表に無い seed = 補足情報
-                       "suspect": bool(full and d.get("state") == "done")}
+                       # 表に無い seed = 補足情報。除外した run は計画の seed のまま
+                       # 下に来るので、実際に計画に無いかで判定する
+                       "unplanned_seed": str(d.get("seed")) not in planned,
+                       # 除外済みは「別の seed も完了している」の疑いに数えない
+                       "suspect": bool(full and d.get("state") == "done" and not gone)}
                 # 失敗・停止した run は枠を埋めない。埋めてしまうと 5 行のうち
                 # 1 行が失敗で占められ、「あと何本回せばよいか」が読めなくなる。
                 # 消さずに下へ出す (どの seed が落ちたかは見たいため)
-                if blanks and d.get("state") in SLOT_STATES:
+                if blanks and d.get("state") in SLOT_STATES and not gone:
                     i = blanks.pop(0)
                     row["reassign"] = slots[i].get("reassign")
                     slots[i] = row
@@ -236,8 +402,9 @@ class State(object):
             # 同じ条件のはずなのにパラメータが割れていたら、**どのキーが違うか**を渡す。
             # ハッシュだけでは何を直せばよいか分からない
             pdiff, phashes = [], {}
-            if len(set(d.get("param_hash") for d in hit)) > 1:
-                diffs, seeds = CR.param_diff(hit)
+            hit_live = [d for d in hit if d["uid"] not in excl]
+            if len(set(d.get("param_hash") for d in hit_live)) > 1:
+                diffs, seeds = CR.param_diff(hit_live)
                 order = sorted(seeds, key=lambda h: (-len(seeds[h]), str(h)))
                 phashes = [{"hash": h, "seeds": sorted(seeds[h])} for h in order]
                 pdiff = [{"key": k,
@@ -293,17 +460,219 @@ class State(object):
                 rows, self.batches, self.errors,
                 saved=CR.load_saved_models(self.args.models_repo),
                 cadence=CR.record_host_seen(rows, hosts=self.conf().get("hosts")))
+            # 除外した run は**判定に一切使わない**。多数決に残すと、たとえば旧報酬の
+            # 3 本を外しても、回し直した新しい 2 本のほうが少数派として params✗ になる。
+            # odd_params は dashboard_data() が全 run で決めているので、ここで決め直す
+            excl = load_json(EXCLUDE_PATH)
+            live = [d for d in rows if d["uid"] not in excl]
+            odd = set(d["uid"] for d in CR.odd_param_runs(live))
+            for r in data["runs"]:
+                r["excluded"] = r["uid"] in excl
+                r["excluded_at"] = excl.get(r["uid"])
+                r["odd_params"] = r["uid"] in odd
             shaped = dict((r["uid"], r) for r in data["runs"])
-            plan, used = self.plan_view(rows, shaped)
+            plan, used = self.plan_view(rows, shaped, excl)
+            # run ごとの「どの計画の枠に入っているか」(running now に出す)。
+            # 1 つの run が複数の計画に数えられることがある (AAMAS と reassign 等)
+            plans_of = {}
+            for c in plan:
+                for sl in c.get("slots") or []:
+                    u = (sl.get("run") or {}).get("uid")
+                    if u and c.get("plan") and c["plan"] not in plans_of.setdefault(u, []):
+                        plans_of[u].append(c["plan"])
             for r in data["runs"]:
                 r["in_plan"] = r["uid"] in used
+                r["plans"] = plans_of.get(r["uid"], [])
+            self.attach_global_diff(plan, [d for d in live if d["uid"] in used])
             data["plan"] = plan
             data["plan_files"] = self.plan_files()
             data["plan_file"] = ", ".join(data["plan_files"])
             data["collected_at"] = self.collected_at
             data["busy"] = self.busy
             data["cache"] = os.path.expanduser(self.args.cache)
+            notes = load_json(NOTE_PATH)
+            for r in data["runs"]:
+                r["note"] = notes.get(r["uid"], "")
+            data["attention"] = self.attention(data["runs"])
         return data
+
+    # --- 全体比較 -------------------------------------------------------
+    def attach_global_diff(self, plan, rows):
+        """計画の各条件に、全体と違う設定 (global_diff) を付ける.
+
+        比べる相手は**表に載っている run だけ** (計画外の試し実行や古い探索を
+        混ぜると多数派がぶれる)。確認済みにしたもの (DISMISS_PATH) は外し、
+        件数だけ n_dismissed として残す (取り消せるように)。
+        """
+        gdiff = global_param_diff(rows)
+        dismissed = load_json(DISMISS_PATH)
+        for c in plan:
+            conds = set(s["run"]["condition"] for s in (c.get("slots") or [])
+                        if s.get("run") and s["run"].get("condition"))
+            live, n_dis = [], 0
+            for cond in sorted(conds):
+                for x in gdiff.get(cond, []):
+                    x = dict(x, cond=cond,
+                             dismiss_key=dismiss_key(cond, x["key"], x["actual"]))
+                    if x["dismiss_key"] in dismissed:
+                        n_dis += 1
+                    else:
+                        live.append(x)
+            c["global_diff"] = live
+            c["global_dismissed"] = n_dis
+            c["global_conds"] = sorted(conds)     # 取り消し用 (確認済みの鍵の頭)
+
+    def dismiss_diff(self, body):
+        """全体との差を「問題なし」にする. body: {"key": dismiss_key}.
+
+        {"undo": true} を付けると取り消す (この条件の確認済みを全部戻す)。
+        """
+        body = body or {}
+        dismissed = load_json(DISMISS_PATH)
+        if body.get("undo"):
+            conds = body.get("conds") or [body.get("cond", "")]
+            prefixes = tuple("%s|" % c for c in conds if c)
+            keys = [k for k in dismissed if prefixes and k.startswith(prefixes)]
+            for k in keys:
+                dismissed.pop(k, None)
+            save_json(dismissed, DISMISS_PATH)
+            return {"undone": len(keys)}
+        k = body.get("key")
+        if not k:
+            return {"ok": False, "error": "key is required"}
+        dismissed[k] = CR.now_utc().isoformat()
+        save_json(dismissed, DISMISS_PATH)
+        return {"ok": True}
+
+    # --- 手動除外 -------------------------------------------------------
+    def exclude(self, body):
+        """run を「5 seed に数えない」にする / 戻す.
+
+        body: {"uid": ..., "on": true}  (false で戻す)
+        """
+        body = body or {}
+        uid = body.get("uid")
+        if not uid:
+            return {"ok": False, "error": "uid is required"}
+        on = bool(body.get("on", True))
+        excl = load_json(EXCLUDE_PATH)
+        if on:
+            excl[uid] = CR.now_utc().isoformat()
+        else:
+            excl.pop(uid, None)
+        save_json(excl, EXCLUDE_PATH)
+        moved, errors = self._move_eval_models(uid, exclude=on)
+        return {"ok": True, "uid": uid, "excluded": uid in excl,
+                "moved": moved, "move_errors": errors}
+
+    def _eval_names(self, uid):
+        """この run が評価用フォルダに置かれたときのファイル名 (保管リポジトリの manifest から)."""
+        path = os.path.join(os.path.expanduser(self.args.models_repo), "manifest.jsonl")
+        names = []
+        try:
+            with open(path, "r") as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if r.get("uid") == uid and r.get("eval_name"):
+                        names.append(r["eval_name"])
+        except (IOError, OSError):
+            pass
+        return names
+
+    def _move_eval_models(self, uid, exclude):
+        """評価用フォルダのモデルに .excluded を付けて評価の対象から外す / 戻す.
+
+        消さずに改名するだけなので「戻す」で元どおりになる。経路方策と割当方策は
+        **同じ名前で別フォルダ**に置かれている (collect_runs.install_models)。
+        戻す先に同じ名前のファイルが既にある場合は上書きしない。
+        """
+        moved, errors = [], []
+        for name in self._eval_names(uid):
+            for kind, rel in sorted(CR.EVAL_MODEL_DIRS.items()):
+                d = os.path.join(REPO, rel)
+                live = os.path.join(d, name)
+                off = live + EXCLUDED_SUFFIX
+                src, dst = (live, off) if exclude else (off, live)
+                if not os.path.exists(src):
+                    continue
+                if os.path.exists(dst):
+                    # 除外で空いた番号は回し直した run に引き継がれる
+                    # (collect_runs.load_seed_index)。その後で「戻す」と同じ名前が
+                    # 2 つになるので、上書きせずに理由を知らせる
+                    if not exclude:
+                        msg = ("%s: この番号は回し直した run が使っているので、"
+                               "モデルは戻していません" % name)
+                        if msg not in errors:
+                            errors.append(msg)
+                    continue
+                try:
+                    os.replace(src, dst)
+                    moved.append("%s/%s" % (kind, os.path.basename(dst)))
+                except OSError as e:
+                    errors.append("%s: %s" % (name, e))
+        return moved, errors
+
+    # --- seed ごとのメモ -------------------------------------------------
+    def note(self, body):
+        """conditions 表に手で書いたコメントを保存する.
+
+        body: {"uid": ..., "text": ...}。空文字なら削除する
+        (空のキーを残すとファイルが使い回すたびに膨らむだけ)
+        """
+        body = body or {}
+        uid = body.get("uid")
+        if not uid:
+            return {"ok": False, "error": "uid is required"}
+        text = str(body.get("text") or "").strip()[:NOTE_MAX]
+        notes = load_json(NOTE_PATH)
+        if text:
+            notes[uid] = text
+        else:
+            notes.pop(uid, None)
+        save_json(notes, NOTE_PATH)
+        return {"ok": True, "uid": uid, "text": text}
+
+    # --- 要確認リスト ---------------------------------------------------
+    def attention(self, runs):
+        """異常終了した run のうち、まだ OK を押していないものを返す.
+
+        OK 済みでも run 自体は conditions / counts にそのまま残る。ここで
+        消えるのは「気づいてほしい」という呼びかけだけ。
+        """
+        acks = load_acks()
+        out = []
+        for r in runs:
+            if r.get("state") not in ATTENTION_STATES:
+                continue
+            key = ack_key(r)
+            if key in acks:
+                continue
+            out.append(dict(r, ack_key=key))
+        # 新しく落ちたものほど上。時刻が無いものは末尾へ
+        out.sort(key=lambda r: r.get("stop_at") or r.get("last_seen") or "",
+                 reverse=True)
+        return out
+
+    def ack(self, body):
+        """OK が押された run を確認済みにする.
+
+        body: {"keys": [ack_key, ...]}  /  {"all": true} で表示中の全部
+        """
+        body = body or {}
+        keys = list(body.get("keys") or [])
+        if body.get("all"):
+            keys += [r["ack_key"] for r in self.train()["attention"]]
+        if not keys:
+            return {"acked": 0}
+        acks = load_acks()
+        now = CR.now_utc().isoformat()
+        for k in keys:
+            acks[k] = now
+        save_acks(acks)
+        return {"acked": len(keys)}
 
     # --- 評価 -----------------------------------------------------------
     def eval(self):
@@ -456,6 +825,10 @@ def make_routes(state):
         ("GET", "/api/status"): lambda body: state.status(),
         ("GET", "/api/mini"): lambda body: state.mini(),
         ("POST", "/api/collect"): lambda body: {"started": state.collect()},
+        ("POST", "/api/ack"): lambda body: state.ack(body),
+        ("POST", "/api/note"): lambda body: state.note(body),
+        ("POST", "/api/dismiss_diff"): lambda body: state.dismiss_diff(body),
+        ("POST", "/api/exclude"): lambda body: state.exclude(body),
     }
 
 

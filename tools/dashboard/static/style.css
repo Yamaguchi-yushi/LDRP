@@ -118,3 +118,55 @@ table.cond td{vertical-align:middle}
 /* 表の中の補助表示 (収集経路など) */
 .sm{font-size:10px;opacity:.75}
 #t-mach td,#t-mach th{white-space:nowrap}
+
+/* 要確認リストの OK ボタン。見出しの「すべて OK」と行の OK で共用 */
+.ack{font-size:11px;padding:2px 10px;margin-left:8px;cursor:pointer;
+     border:1px solid var(--line);border-radius:4px;background:transparent;
+     color:inherit}
+.ack:hover:not(:disabled){border-color:var(--ok);color:var(--ok)}
+.ack:disabled{opacity:.4;cursor:default}
+#t-att td{white-space:nowrap;vertical-align:top}
+/* 条件セル: 主要部 (台数/map/algo) を強め、付帯条件は薄いラベル付きで並べる */
+.attmain{font-weight:600}
+#t-att .mut b,#t-att .wrn b{font-weight:normal;opacity:.65;margin-right:2px}
+#t-att td span+span{margin-left:8px}
+
+/* seed ごとのコメント欄。表の行を太らせないよう枠は薄く、幅は控えめに */
+/* 空欄でも「ここに書ける」と分かるよう、薄い破線の枠を常に出す。
+   (枠を透明にすると、placeholder を隠したときに欄ごと見えなくなる) */
+.note{width:200px;max-width:26vw;font:inherit;font-size:11px;padding:2px 5px;
+      color:inherit;background:transparent;border:1px dashed var(--line);
+      border-radius:4px}
+.note:hover{border-style:solid;border-color:var(--mut)}
+.note:focus{border-style:solid;border-color:var(--run);outline:none;background:var(--bg)}
+/* 空欄が何百行も並ぶので、普段は placeholder を出さず行にカーソルを乗せたときだけ出す */
+.note::placeholder{color:var(--mut);opacity:0}
+tr:hover .note::placeholder,.note:focus::placeholder{opacity:.55}
+.note.saved{border-color:var(--ok)}
+
+/* conditions 表の列を全表で揃える (列幅は app.js の COND_COLS)。
+   固定レイアウトにすると中身の長さで列幅が変わらなくなる代わりに、
+   はみ出した分は隣の列に食い込むので、状態以外は省略記号で切る */
+table.cond{table-layout:fixed;min-width:1020px}
+table.cond td{overflow:hidden;text-overflow:ellipsis}
+/* 状態は唯一の可変幅の列。長いときは切らずに折り返す */
+table.cond td.st{white-space:normal;overflow:visible}
+/* 差分の展開行は中に表を持つので切らない */
+table.cond tr.diffrow>td{white-space:normal;overflow:visible}
+/* コメント欄は列幅いっぱいに広げる (列幅側で固定しているので) */
+table.cond .note{width:100%;max-width:none}
+
+/* 「他と違う」: 条件内の params✗ (数から外す) と区別するため破線にする */
+button.gdiffbtn{border-style:dashed;color:var(--warn)}
+tr.gdiffrow table.pdiff td.wrn{font-weight:600}
+
+/* 手動除外した seed 行。本数には数えないが、どれを外したかは見たいので残す */
+tr.excl{opacity:.55}
+tr.excl:hover{opacity:1}
+tr.excl>td:first-child,tr.excl .exltxt{text-decoration:line-through}
+.exl{color:var(--mut);border:1px solid var(--line);border-radius:3px;
+     padding:0 4px;font-size:10px}
+/* 「除外」ボタンは普段は目立たせず、行にカーソルを乗せたときだけ出す
+   (238 行に常時並ぶと状態の列が読みにくくなる) */
+.exlbtn{visibility:hidden}
+tr:hover .exlbtn,.exlbtn:focus{visibility:visible}

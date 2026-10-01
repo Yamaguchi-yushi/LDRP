@@ -28,7 +28,12 @@
     <span><label>machine</label><select id="t-machine"></select></span>
     <span><label>map</label><select id="t-map"></select></span>
     <span><label>N</label><select id="t-agents"></select></span>
+    <span><label>t_max</label><select id="t-tmax"></select></span>
+    <span><label>setting</label><select id="t-setting"></select></span>
     <span><label>algo</label><select id="t-algo"></select></span>
+    <span><label>arrival</label><select id="t-arrival"></select></span>
+    <span><label>assign</label><select id="t-assign"></select></span>
+    <span><label>dynamic</label><select id="t-dynamic"></select></span>
     <span><label>状態</label><select id="t-state">
       <option value="">(all)</option><option>done</option><option>running</option>
       <option>stalled</option><option>failed</option><option>short</option>
@@ -43,6 +48,9 @@
 
   <h2>running now</h2>
   <div class="wrap"><table id="t-run"></table></div>
+
+  <h2 id="t-att-h" hidden>要確認 <button id="t-att-all" class="ack">すべて OK</button></h2>
+  <div class="wrap"><table id="t-att"></table></div>
 
   <h2>conditions</h2>
   <div id="t-conds"></div>
