@@ -117,35 +117,51 @@ def _tail_text(path, nbytes):
     return data.decode("utf-8", "replace")
 
 
-# JSON 配列の要素になっている整数だけを拾う。
-# "[500, 1000, ...]" の形にだけ当てることで、文字列中の "2026-08-19T..." (年) や
-# 小数 (json は 1024.0 と必ず小数点付きで書く) を確実に除外する
-ARRAY_INT_RE = re.compile(r"[\[,]\s*(\d{4,})(?=\s*[,\]])")
+# metrics.json の "steps": [...] 配列。中身は素の整数 (= その記録の t_env) だけ。
+# values (小数) や timestamps (文字列) は見ない。以前は「配列要素の整数」を全部拾って
+# いたので、末尾に steps が無いと values の整数を t_env と取り違えるおそれがあった
+STEPS_ARRAY_RE = re.compile(r'"steps":\s*\[([^\]]*)\]')
+
+# 末尾を読む量の上限。記録が増えると、最後の指標 1 つ分 (steps / timestamps / values)
+# だけで 256KB を超え、末尾 256KB に steps が入らなくなる
+# (GPU1 の mappo aoba00 10 台、1.2 億ステップで 1 指標 332KB の実測)。
+# steps が見つかるまで 2 倍ずつ広げ、ここで打ち切る
+METRICS_TAIL_MAX = 8 * 1024 * 1024
 
 
 def _t_env_from_metrics(path, nbytes, cap):
     """cout.txt が空のときの保険。metrics.json の末尾だけを読み、
-    t_max を超えない最大の整数 (= 直近の t_env) を拾う。
+    steps 配列の中で t_max を超えない最大の整数 (= 直近の t_env) を拾う。
 
-    metrics.json は 1〜5MB あるので絶対に全体をロードしない。
-    steps 配列の値は素の整数、values は小数、timestamps は文字列なので、
-    「配列要素の整数」だけを見れば t_env に当たる。
+    metrics.json は数十 MB になるので全体はロードしない。末尾 nbytes に
+    steps 配列が 1 つも入っていなければ、読む量を 2 倍ずつ増やして読み直す
+    (上限 METRICS_TAIL_MAX)。
     """
-    text = _tail_text(path, nbytes)
-    if not text:
+    try:
+        size = os.path.getsize(path)
+    except OSError:
         return None
     try:
         limit = float(cap) * 1.01 if cap else None
     except (TypeError, ValueError):
         limit = None
-    best = None
-    for m in ARRAY_INT_RE.finditer(text):
-        v = int(m.group(1))
-        if limit is not None and v > limit:
-            continue
-        if best is None or v > best:
-            best = v
-    return best
+    n = nbytes
+    while True:
+        text = _tail_text(path, n)
+        best = None
+        for arr in STEPS_ARRAY_RE.finditer(text):
+            for tok in arr.group(1).split(","):
+                tok = tok.strip()
+                if not tok.isdigit():
+                    continue
+                v = int(tok)
+                if limit is not None and v > limit:
+                    continue
+                if best is None or v > best:
+                    best = v
+        if best is not None or n >= size or n >= METRICS_TAIL_MAX:
+            return best
+        n *= 2
 
 
 def _pick(d, keys):
