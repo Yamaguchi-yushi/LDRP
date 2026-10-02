@@ -47,3 +47,10 @@ tools/.run_cache.jsonl.bak*
 # (gitignore は行末コメントを解釈しないので、説明は必ず独立行に書く)
 tmp_results/
 .claude/skills/
+
+# 解説用の HTML 教材 (手元で読むだけ。公開しない)
+design/walkthrough/*.html
+tools/.acked_runs.json
+tools/.param_dismissed.json
+tools/.run_excluded.json
+tools/.run_notes.json
