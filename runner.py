@@ -323,30 +323,6 @@ class Runner():
         collision_rate = collision_count / total if total > 0 else 0.0
         non_collision_mean = np.mean(full_completion) if full_completion else 0.0
 
-        # test.py がログの最後にまとめの表を出すための値 (指標名, 表示する文字列)。
-        # 下の集計結果と同じ指標・同じ桁数にそろえる
-        self.summary = [
-            ("Episodes", f"{total}"),
-            ("Avg steps", f"{np.mean(steps):.1f}"),
-            ("Task completion", f"{np.mean(task_completion):.2f}"),
-            ("  per agent", f"{np.mean(per_agent):.3f}"),
-            ("Active agents", f"{np.mean(n_active):.2f}"),
-            ("  w/o collision episodes", f"{non_collision_mean:.2f}"),
-            ("  max", f"{np.max(task_completion)}"),
-            ("  min", f"{np.min(task_completion)}"),
-            ("Busy ratio (has task, %)", f"{np.mean(busy)*100:.1f}"),
-            ("Idle ratio (%)", f"{(1 - np.mean(busy))*100:.1f}"),
-            ("Deadhead steps / task", f"{np.mean(deadhead_per_task):.2f}"),
-            ("Busy steps / task", f"{np.mean(steps_per_task):.2f}"),
-            ("Arrived tasks", f"{np.mean(arrival):.1f}"),
-            (f"Dropped tasks (queue > {self.env.task_num})", f"{np.mean(dropped):.1f}"),
-            ("Pending avg / peak", f"{np.mean(pending_avg):.2f} / {np.mean(pending_max):.2f}"),
-            ("Unassigned avg / final", f"{np.mean(unassigned_avg):.2f} / {np.mean(unassigned_final):.2f}"),
-            ("Collision episodes", f"{collision_count}/{total}"),
-            ("Time total (s)", f"{np.sum(times):.2f}"),
-            ("Time / episode (s)", f"{np.mean(times):.2f}"),
-        ]
-
         print("=== 集計結果 ===")
         print(f"Total test episodes: {total}")
         print(f"Average steps:       {np.mean(steps):.1f}")

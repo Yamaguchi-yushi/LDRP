@@ -10,58 +10,66 @@ from argparse import Namespace
 import argparse
 import torch
 from runner import Runner
-import unicodedata
+import os
+from src.all_policy.policy import model_stem_form_args, resolve_model_path, PATH_MODELS_DIR, TASK_MODELS_DIR
 
 
-def _width(s):
-    # 表示したときの幅。日本語 (全角) は英字 2 文字分
-    return sum(2 if unicodedata.east_asian_width(c) in ("F", "W") else 1 for c in s)
+def _model_file(config, models_dir):
+    """この条件で読むモデルのファイル名 (見出し用)。無ければ (not found) を付けて返す."""
+    if config.path_planner == "mat_dec" and getattr(config, "mat_model_agent_num", None):
+        model_n = config.mat_model_agent_num
+    else:
+        model_n = config.agent_num
+    stem = model_stem_form_args(config, model_n)
+    seed = int(getattr(config, "model_seed", 0) or 0)
+    try:
+        return os.path.basename(resolve_model_path(stem, seed, models_dir))
+    except (FileNotFoundError, ValueError):
+        return f"{stem}_seed{seed}.th (not found)"
 
 
-def _pad(s, w, right=False):
-    sp = " " * max(0, w - _width(s))
-    return sp + s if right else s + sp
+def print_condition_header(k, total, config, arrival, reassign_flag, model_tag, training):
+    """各条件の評価を始める前に、その条件を見やすく並べて出す."""
+    mode, _, p = arrival.partition(":")
+    if mode == "bernoulli":
+        arr = f"bernoulli (p={p})"
+    elif mode == "mmpp":
+        arr = (f"mmpp (p_high={config.task_p_high}, p_low={config.task_p_low}, "
+               f"switch_prob={config.task_switch_prob})")
+    elif mode == "fixed":
+        arr = "fixed (1 task / step)"
+    else:
+        arr = mode
 
+    if config.path_planner == "pbs":
+        path_model = "- (pbs: search-based, no model)"
+    else:
+        path_model = _model_file(config, PATH_MODELS_DIR)
+    if config.task_assigner != "ppo":
+        task_model = f"- ({config.task_assigner}: rule-based, no model)"
+    elif training:
+        task_model = "- (training from scratch)"
+    elif getattr(config, "ppo_task_checkpoint_path", ""):
+        task_model = f"{config.ppo_task_checkpoint_path} (ppo_task_checkpoint_path)"
+    else:
+        task_model = _model_file(config, TASK_MODELS_DIR)
 
-def print_summary_table(title, columns):
-    """行 = 指標・列 = 条件の表を出す。見出しは 2 段 (上: 到着 / 下: 再割当の有無).
-
-    columns: [((上の見出し, 下の見出し), [(指標名, 値の文字列), ...]), ...]
-    上の見出しが同じ列が続くときは、上の段をまとめて 1 つにする。
-    """
-    if not columns:
-        return
-    names = [name for name, _ in columns[0][1]]
-    label_w = max(_width(n) for n in names) + 2
-    col_w = [max([_width(bottom)] + [_width(v) for _, v in rows]) + 2
-             for (top, bottom), rows in columns]
-
-    # 上の見出しが同じ列のかたまり [(上の見出し, 先頭の列, 最後の列), ...]
-    groups = []
-    for k, ((top, _), _) in enumerate(columns):
-        if groups and groups[-1][0] == top:
-            groups[-1][2] = k
-        else:
-            groups.append([top, k, k])
-    # かたまりの幅が上の見出しより狭ければ、最後の列を広げる
-    for top, i, j in groups:
-        lack = _width(top) + 6 - sum(col_w[i:j + 1])
-        if lack > 0:
-            col_w[j] += lack
-
-    top_line = " " * label_w
-    for top, i, j in groups:
-        span = sum(col_w[i:j + 1])
-        text = " " + top + " "
-        dash = span - 2 - _width(text)          # 左の 2 文字は列の間の空白
-        top_line += "  " + "-" * (dash // 2) + text + "-" * (dash - dash // 2)
-    print("\n" + title, flush=True)
-    print(top_line)
-    print(" " * label_w + "".join(_pad(bottom, w, right=True)
-                                  for ((_, bottom), _), w in zip(columns, col_w)))
-    for i, name in enumerate(names):
-        print(_pad(name, label_w) + "".join(_pad(rows[i][1], w, right=True)
-                                           for (_, rows), w in zip(columns, col_w)), flush=True)
+    line = "=" * 80
+    print(f"\n{line}", flush=True)
+    print(f"Condition {k}/{total}{'  [TRAINING]' if training else ''}")
+    print(f"  map / agents    : {config.map_name} / {config.agent_num}")
+    print(f"  path planner    : {config.path_planner}  (method_tag={getattr(config, 'method_tag', '') or '-'}, trained: {model_tag})")
+    print(f"  task assigner   : {config.task_assigner}")
+    print(f"  model seed      : {getattr(config, 'model_seed', 0)}")
+    print(f"  path model      : {path_model}")
+    print(f"  task model      : {task_model}")
+    print(f"  task arrival    : {arr}")
+    print(f"  reassign        : {'allowed' if reassign_flag else 'not allowed'} at execution")
+    print(f"  env             : safe={getattr(config, 'use_safe_env', True)}, "
+          f"dynamic_agents={getattr(config, 'use_dynamic_agents', False)}")
+    print(f"  episodes        : {config.test_num} x {config.time_limit} steps "
+          f"(eval_seed={config.eval_seed}, episode_seed_base={config.episode_seed_base})")
+    print(line, flush=True)
 
 
 if __name__ == "__main__":
@@ -195,10 +203,9 @@ if __name__ == "__main__":
         if arrival.startswith("bernoulli") and ":" not in arrival:
             raise ValueError(f"'{arrival}' needs a probability, e.g. bernoulli:0.05")
 
-    summary_columns = []   # ログの最後に出すまとめの表の列 (条件ごと)
-
-    for arrival, reassign_flag in product(arrivals, reassign_flags):
-        print(f"\n########## model={model_tag} arrival={arrival} allow_reassign_before_pickup={reassign_flag}##########", flush=True)
+    combos = list(product(arrivals, reassign_flags))
+    for k, (arrival, reassign_flag) in enumerate(combos, 1):
+        print_condition_header(k, len(combos), config, arrival, reassign_flag, model_tag, training)
         mode, _, p = arrival.partition(":")
         config.task_arrival = mode
         if p:
@@ -230,13 +237,3 @@ if __name__ == "__main__":
         runner = Runner(config, env, reward_list, training=training)
         runner.run()
         runner.finish()
-        if getattr(runner, "summary", None):
-            top = arrival.replace("bernoulli:", "bernoulli p=")
-            bottom = "reassign" if reassign_flag else "no-reassign"
-            summary_columns.append(((top, bottom), runner.summary))
-
-    print_summary_table(
-        f"[summary] {config.map_name} / {config.agent_num} agents / {config.path_planner} / "
-        f"{config.task_assigner} / trained: {model_tag} / seed{getattr(config, 'model_seed', 0)}"
-        f"   (top: task arrival / bottom: reassign at execution)",
-        summary_columns)
