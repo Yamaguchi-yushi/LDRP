@@ -14,6 +14,7 @@ import yaml
 
 from src.policy import Policy
 from src.all_policy.policy_manager import PolicyManager
+from src.all_policy.policy import model_stem_form_args, resolve_model_path, TASK_MODELS_DIR
 from src.task_assign.task_manager import TaskManager
 
 
@@ -87,6 +88,12 @@ class Runner():
                  "gym.make and PPOAgent.")
 
         self.writer = None
+        self.task_model_path = None
+        if (not self.training and args.task_assigner == "ppo" and not getattr(args, "ppo_task_checkpoint_path", "")):
+            stem = model_stem_form_args(args, args.agent_num)
+            self.task_model_path = resolve_model_path(stem, self.model_seed, TASK_MODELS_DIR)
+            _asg.load_model_file(self.task_model_path)
+
         if self.training:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             log_dir = os.path.join("tmp_results", "task_ppo", f"{args.map_name}_{args.agent_num}_{args.path_planner}_{stamp}",)
@@ -101,8 +108,16 @@ class Runner():
         env_re = "_envreassign" if getattr(a, "allow_reassign_before_pickup", False) else ""
         train_n = getattr(a, "mat_model_agent_num", None) if a.path_planner == "mat_dec" else None
         train = f"_train{train_n}" if train_n else ""
+        dyn = "_dyn" if getattr(a, "use_dynamic_agents", False) else ""
+        mode = getattr(a, "task_arrival", "fixed")
+        if mode == "fixed":
+            arr = ""
+        elif mode == "bernoulli":
+            arr = f"_bern{float(a.task_density):g}"
+        else:
+            arr = f"_{mode}" 
         return (f"{a.map_name}/{a.agent_num}agent/"
-                f"{env_tag}_{a.path_planner}{tag}_{reassign}_{a.task_assigner}{train}{env_re}")
+                f"{env_tag}_{a.path_planner}{tag}_{reassign}_{a.task_assigner}{train}{dyn}{arr}{env_re}")
 
     def _print_result_line(self, times):
         infos = list(self.info_buffer)
@@ -111,6 +126,14 @@ class Runner():
         m = {"condition": self._condition_id(),
              "model_seed": self.model_seed,
              "n_ep": len(infos)}
+
+        mp = getattr(getattr(self.path_planner, "path_planner", None), "resolved_model_path", None)
+        if mp:
+            m["model"] = os.path.basename(mp)
+
+        if self.task_model_path:
+            m["task_model"] = os.path.basename(self.task_model_path)
+
         for k in ("step", "goal_account", "task_completion", "task_completion_per_agent",
                   "n_active_mean", "busy_ratio", "deadhead_ratio",
                   "deadhead_steps_per_task", "agent_steps_per_task",
@@ -299,6 +322,30 @@ class Runner():
         collision_count = total - len(full_completion)
         collision_rate = collision_count / total if total > 0 else 0.0
         non_collision_mean = np.mean(full_completion) if full_completion else 0.0
+
+        # test.py がログの最後にまとめの表を出すための値 (指標名, 表示する文字列)。
+        # 下の集計結果と同じ指標・同じ桁数にそろえる
+        self.summary = [
+            ("Episodes", f"{total}"),
+            ("Avg steps", f"{np.mean(steps):.1f}"),
+            ("Task completion", f"{np.mean(task_completion):.2f}"),
+            ("  per agent", f"{np.mean(per_agent):.3f}"),
+            ("Active agents", f"{np.mean(n_active):.2f}"),
+            ("  w/o collision episodes", f"{non_collision_mean:.2f}"),
+            ("  max", f"{np.max(task_completion)}"),
+            ("  min", f"{np.min(task_completion)}"),
+            ("Busy ratio (has task, %)", f"{np.mean(busy)*100:.1f}"),
+            ("Idle ratio (%)", f"{(1 - np.mean(busy))*100:.1f}"),
+            ("Deadhead steps / task", f"{np.mean(deadhead_per_task):.2f}"),
+            ("Busy steps / task", f"{np.mean(steps_per_task):.2f}"),
+            ("Arrived tasks", f"{np.mean(arrival):.1f}"),
+            (f"Dropped tasks (queue > {self.env.task_num})", f"{np.mean(dropped):.1f}"),
+            ("Pending avg / peak", f"{np.mean(pending_avg):.2f} / {np.mean(pending_max):.2f}"),
+            ("Unassigned avg / final", f"{np.mean(unassigned_avg):.2f} / {np.mean(unassigned_final):.2f}"),
+            ("Collision episodes", f"{collision_count}/{total}"),
+            ("Time total (s)", f"{np.sum(times):.2f}"),
+            ("Time / episode (s)", f"{np.mean(times):.2f}"),
+        ]
 
         print("=== 集計結果 ===")
         print(f"Total test episodes: {total}")

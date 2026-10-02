@@ -2,6 +2,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import yaml
+from itertools import product
 import gym
 import sys
 import numpy as np
@@ -9,6 +10,58 @@ from argparse import Namespace
 import argparse
 import torch
 from runner import Runner
+import unicodedata
+
+
+def _width(s):
+    # 表示したときの幅。日本語 (全角) は英字 2 文字分
+    return sum(2 if unicodedata.east_asian_width(c) in ("F", "W") else 1 for c in s)
+
+
+def _pad(s, w, right=False):
+    sp = " " * max(0, w - _width(s))
+    return sp + s if right else s + sp
+
+
+def print_summary_table(title, columns):
+    """行 = 指標・列 = 条件の表を出す。見出しは 2 段 (上: 到着 / 下: 再割当の有無).
+
+    columns: [((上の見出し, 下の見出し), [(指標名, 値の文字列), ...]), ...]
+    上の見出しが同じ列が続くときは、上の段をまとめて 1 つにする。
+    """
+    if not columns:
+        return
+    names = [name for name, _ in columns[0][1]]
+    label_w = max(_width(n) for n in names) + 2
+    col_w = [max([_width(bottom)] + [_width(v) for _, v in rows]) + 2
+             for (top, bottom), rows in columns]
+
+    # 上の見出しが同じ列のかたまり [(上の見出し, 先頭の列, 最後の列), ...]
+    groups = []
+    for k, ((top, _), _) in enumerate(columns):
+        if groups and groups[-1][0] == top:
+            groups[-1][2] = k
+        else:
+            groups.append([top, k, k])
+    # かたまりの幅が上の見出しより狭ければ、最後の列を広げる
+    for top, i, j in groups:
+        lack = _width(top) + 6 - sum(col_w[i:j + 1])
+        if lack > 0:
+            col_w[j] += lack
+
+    top_line = " " * label_w
+    for top, i, j in groups:
+        span = sum(col_w[i:j + 1])
+        text = " " + top + " "
+        dash = span - 2 - _width(text)          # 左の 2 文字は列の間の空白
+        top_line += "  " + "-" * (dash // 2) + text + "-" * (dash - dash // 2)
+    print("\n" + title, flush=True)
+    print(top_line)
+    print(" " * label_w + "".join(_pad(bottom, w, right=True)
+                                  for ((_, bottom), _), w in zip(columns, col_w)))
+    for i, name in enumerate(names):
+        print(_pad(name, label_w) + "".join(_pad(rows[i][1], w, right=True)
+                                           for (_, rows), w in zip(columns, col_w)), flush=True)
 
 
 if __name__ == "__main__":
@@ -38,6 +91,12 @@ if __name__ == "__main__":
                     config.model_seed = int(val)
                 elif key == "use_safe_env":
                     config.use_safe_env = val.lower() in ("1", "true", "yes") 
+                elif key == "use_dynamic_agents":
+                    config.use_dynamic_agents = val.lower() in ("1", "true", "yes")
+                elif key == "arrival":
+                    config.eval_arrivals = val.split(",")
+                elif key == "allow_reassign":
+                    config.eval_allow_reassign = [v.lower() in ("1", "true", "yes") for v in val.split(",")]
                 else:
                     raise ValueError(f"Unknown key in argument: {key}")
             elif tok in ("base", "reassign"):
@@ -126,11 +185,27 @@ if __name__ == "__main__":
     if training and config.task_assigner != "ppo":
         raise ValueError("train_task_assigner is True but task_assigner is not 'ppo'.")
     
-    # 今回の論文では再割当を扱わないため, 全条件を「再割当なし」で揃える
-    # (design/next_actions.md §11)。両条件を測りたくなったら下の行に戻す。
-    # for reassign_flag in (False, True): # タスク再割り当てありの方策実行の場合
-    for reassign_flag in (False,):
-        print(f"\n########## model={model_tag}  allow_reassign_before_pickup={reassign_flag} ##########", flush=True)
+    if training:
+        arrivals = [config.task_arrival]
+        reassign_flags = [bool(config.allow_reassign_before_pickup)]
+    else:
+        arrivals = list(config.eval_arrivals)
+        reassign_flags = list(config.eval_allow_reassign)
+    for arrival in arrivals:
+        if arrival.startswith("bernoulli") and ":" not in arrival:
+            raise ValueError(f"'{arrival}' needs a probability, e.g. bernoulli:0.05")
+
+    summary_columns = []   # ログの最後に出すまとめの表の列 (条件ごと)
+
+    for arrival, reassign_flag in product(arrivals, reassign_flags):
+        print(f"\n########## model={model_tag} arrival={arrival} allow_reassign_before_pickup={reassign_flag}##########", flush=True)
+        mode, _, p = arrival.partition(":")
+        config.task_arrival = mode
+        if p:
+            config.task_density = float(p)
+        arrival_kwargs = {k: getattr(config, k) for k in 
+                          ("task_arrival", "task_density", "task_p_high", "task_p_low", "task_switch_prob")
+                          if hasattr(config, k)}
         config.allow_reassign_before_pickup = reassign_flag
         np.random.seed(config.seed if training else config.eval_seed) #シード値を固定するため
         torch.manual_seed(config.seed)
@@ -145,6 +220,7 @@ if __name__ == "__main__":
             allow_reassign_before_pickup=reassign_flag,
             **lare_kwargs,
             **dynamic_agent_kwargs,
+            **arrival_kwargs
         )
         """
         with open("./config/algo/" + config.algo + ".yaml", 'r') as file:
@@ -154,3 +230,13 @@ if __name__ == "__main__":
         runner = Runner(config, env, reward_list, training=training)
         runner.run()
         runner.finish()
+        if getattr(runner, "summary", None):
+            top = arrival.replace("bernoulli:", "bernoulli p=")
+            bottom = "reassign" if reassign_flag else "no-reassign"
+            summary_columns.append(((top, bottom), runner.summary))
+
+    print_summary_table(
+        f"[summary] {config.map_name} / {config.agent_num} agents / {config.path_planner} / "
+        f"{config.task_assigner} / trained: {model_tag} / seed{getattr(config, 'model_seed', 0)}"
+        f"   (top: task arrival / bottom: reassign at execution)",
+        summary_columns)
