@@ -79,7 +79,9 @@ const FV = {
   "t-arrival": { cond: c => c.task_arrival || "",    run: r => r.task_arrival || "" },
   // 割当学習なし = 空欄。表では "TP" と出しているので合わせる
   "t-assign":  { cond: c => c.task_assign || "TP",   run: r => r.task_assign || "TP" },
-  "t-dynamic": { cond: c => c.dynamic ? "T" : "F",   run: r => r.dynamic_agents ? "T" : "F" },
+  // 計画表に reassign 列が無い (= 問わない) 条件は空。選んだときは表から外れる
+  "t-reassign": { cond: c => c.reassign == null ? "" : (c.reassign ? "T" : "F"),
+                  run:  r => r.reassign ? "T" : "F" },
 };
 const FV_IDS = Object.keys(FV);
 // 選択肢は **表に出るものだけ** から集める (計画の条件 + 計画に載った run + 実行中)。
@@ -140,13 +142,16 @@ const OPEN_DIFF = new Set();
 // (例: setting が "safe" だけの表と "8x5_2 10M aoba00_2 5M" を含む表で 17 文字ずれる)。
 // 全表で同じ colgroup + table-layout:fixed にして位置を固定する。
 // 幅は 2026-09 時点の実データの最大長 + 見出しの長さから決めた。状態だけ残りを取る
-const COND_COLS = `<colgroup>
+// dynamic の列は出さない (どの計画も F だけ)。代わりに reassign を全部の表に出す
+const condCols = () => `<colgroup>
   <col style="width:calc(12ch + 16px)"><col style="width:calc(8ch + 16px)">
   <col style="width:calc(22ch + 16px)"><col style="width:calc(12ch + 16px)">
-  <col style="width:calc(16ch + 16px)"><col style="width:calc(12ch + 16px)">
-  <col style="width:calc(8ch + 16px)"><col></colgroup>`;
+  <col style="width:calc(28ch + 16px)"><col style="width:calc(12ch + 16px)">
+  <col style="width:calc(9ch + 16px)"><col></colgroup>`;
+// 再割当ありの条件だけ末尾に印を足す (再割当なしは今までと同じ鍵のまま = 開閉状態などを引き継ぐ)
 const condKey = c => [c.plan, c.label, c.setting, c.algo,
-                      c.task_assign || "TP", c.dynamic ? 1 : 0].join("|");
+                      c.task_assign || "TP", c.dynamic ? 1 : 0].join("|")
+                     + (c.reassign ? "|R" : "");
 
 // クリックは委譲で受ける。表は再描画のたびに作り直されるので個別の onclick は付けない
 document.addEventListener("click", ev => {
@@ -269,6 +274,8 @@ function renderTrain() {
         <td class="mut">${when(m.eta)}</td></tr>`;
     }).join("") || `<tr><td class="mut" colspan="7">なし</td></tr>`);
 
+  renderLoad();
+
   // 情報が古いホストがあれば見出しで知らせる (run の状態と混ぜない)
   const quiet = Object.entries(TRAIN.machines || {}).filter(([, b]) => b.stale_data);
   $("t-stale").innerHTML = quiet.map(([k, b]) => {
@@ -337,6 +344,7 @@ function renderTrain() {
           + `<span class="mut">(表には出しません。running / machines には出ます)</span></div>`;
 
   let head = null, planHead = null, diffN = 0;
+  const WARN = [];     // 上の「パラメータの警告」一覧に出すもの (表の描画と同じ判定で集める)
   const multi = new Set(plan.map(c => c.plan)).size > 1;
   plan.forEach(c => {
     // 複数の計画を読んでいるときだけ計画名の見出しを出す (1 枚運用では邪魔になる)
@@ -352,10 +360,11 @@ function renderTrain() {
       html += `<h3><span class="g-map">${esc(c.map || "")}</span>`
             + `<span class="g-n">${c.agents} agent</span>`
             + `<span class="g-t">${c.t_max_m}M</span></h3>`
-            + `<div class="wrap"><table class="cond">${COND_COLS}
+            + `<div class="wrap"><table class="cond">${condCols()}
         <tr><th>seed</th><th>machine</th><th>setting</th><th>algorithm</th>
-            <th>task arrival</th><th>task assign</th><th>dynamic</th><th>状態</th></tr>`;
+            <th>task arrival</th><th>task assign</th><th>reassign</th><th>状態</th></tr>`;
     }
+    const NC = 8;                // 表の列の数 (隠し行の colspan に使う)
     const want = c.want || WANT_DEFAULT;
     // 5 seed に数えてよい run: 設定が割れていない (params✗ でない) かつ 手で除外していない
     const usable = r => r && !r.odd_params && !r.excluded;
@@ -379,7 +388,10 @@ function renderTrain() {
     const allDone = filled && kept >= want;     // 学習もモデルも揃って「完了」
     const odd = filled ? 0 : c.slots.filter(s => s.run && s.run.odd_params).length;
     const tmax = slots.find(s => s.run && s.run.t_max_ok === false);
-    const dyn = c.dynamic == null ? "" : (c.dynamic ? "T" : "F");
+    // 計画表に reassign 列が無い計画 (plan_AAMAS) は「問わない」
+    const ra = c.reassign == null
+      ? `<span class="mut" title="計画表に reassign の列がありません (問わない)">-</span>`
+      : (c.reassign ? "T" : "F");
 
     // 差分があるときだけ押せるボタンを出す。押すと下の隠し行が開く。
     // **5 seed そろっている条件では出さない**。揃っていれば余分な run は使わないので、
@@ -396,7 +408,8 @@ function renderTrain() {
 
     // 全体比較: 表の他の条件 (同じ algo / dynamic) と設定が違うもの。
     // 条件内の params✗ とは別物なので、色と文言を分ける (こちらは「数から外さない」)
-    const G = c.global_diff || [];
+    // 5 seed そろった条件では出さない (params✗ と同じ運用。揃っていれば回し直さない)
+    const G = filled ? [] : (c.global_diff || []);
     const gn = G.length ? ++diffN : 0;
     const gkey = "g|" + dkey;
     const gopened = OPEN_DIFF.has(gkey);
@@ -411,10 +424,13 @@ function renderTrain() {
             + `<a href="#" class="gundo" data-conds="${esc(JSON.stringify(c.global_conds || []))}">取り消す</a></span>`
           : "");
 
+    if (hasDiff) WARN.push({ kind: "split", c, n: dn });
+    if (G.length) WARN.push({ kind: "global", c, n: gn, G });
+
     html += `<tr class="condrow"><td></td><td></td>
       <td title="${esc(c.setting)}">${esc(c.setting)}</td><td>${esc(ALGO(c.algo))}</td>
       <td>${esc(c.task_arrival)}</td><td>${esc(c.task_assign || "TP")}</td>
-      <td>${esc(dyn)}</td>
+      <td>${ra}</td>
       <td class="st">${
         `<span class="${filled ? "c-ok" : "wrn"}">学習 ${done}/${want}</span>`}${
         `<span class="${kept >= want ? "c-ok" : (kept ? "wrn" : "mut")}">モデル ${kept}/${want}</span>`}${
@@ -428,7 +444,7 @@ function renderTrain() {
     if (G.length) {
       html += `<tr class="diffrow gdiffrow" data-n="${gn}" data-key="${esc(gkey)}"${
         gopened ? "" : " hidden"}>
-        <td colspan="8">
+        <td colspan="${NC}">
         <div class="wrn">表の他の条件 (同じ algo・dynamic) と設定が違います。`
         + `意図した違いなら「問題なし」で消せます</div>
         <table class="pdiff"><tr><th>key</th><th>この条件</th><th>他の条件 (多数派)</th><th></th></tr>`
@@ -446,16 +462,10 @@ function renderTrain() {
       const hs = c.param_hashes || [];
       html += `<tr class="diffrow" data-n="${dn}" data-key="${esc(dkey)}"${
         opened ? "" : " hidden"}>
-        <td colspan="8">
+        <td colspan="${NC}">
         <div class="wrn">パラメータが ${hs.length} 通りに割れています `
         + `(${c.param_diff.length} キー)</div>
-        <table class="pdiff"><tr><th>key</th>`
-        + hs.map(h => `<th>${esc(h.hash)}<br><span class="mut">`
-                    + `${h.seeds.length} seed</span></th>`).join("")
-        + `</tr>`
-        + c.param_diff.map(d => `<tr><td>${esc(d.key)}</td>`
-            + d.vals.map(v => `<td>${esc(v)}</td>`).join("") + `</tr>`).join("")
-        + `</table>
+        ${splitTable(c)}
         <div class="mut">seed: `
         + hs.map(h => `${esc(h.hash)} = ${h.seeds.map(esc).join(", ")}`).join(" / ")
         + `</div></td></tr>`;
@@ -536,6 +546,7 @@ function renderTrain() {
   });
   if (head !== null) html += `</table></div>`;
   $("t-conds").innerHTML = html || `<div class="mut">計画に一致する条件がありません</div>`;
+  renderParamWarn(WARN);
   restoreNoteFocus(keptNote);
 }
 
@@ -553,13 +564,44 @@ async function loadEval() {
   fillSelect($("e-planner"), uniq(C, "planner"));
   fillSelect($("e-tag"), uniq(C, "method_tag"));
   fillSelect($("e-alloc"), uniq(C, "allocator"));
+  fillSelect($("e-trained"), [...new Set(C.map(EF.reassign))].sort());
+  fillSelect($("e-exre"), [...new Set(C.map(EF.env_reassign))].sort());
+  fillSelect($("e-arrival"), [...new Set(C.map(EF.arrival))].sort(natCmp));
+  // 比較に使える要素のチェックボックス (前に選んでいたものは残す)
+  $("e-cmp").innerHTML = EVAL_FACTORS.map(([k, l]) =>
+    `<label><input type="checkbox" value="${k}"${CMP.has(k) ? " checked" : ""}> ${esc(l)}</label>`).join("");
+  $("e-cmp").querySelectorAll("input").forEach(el => el.onchange = () => {
+    if (el.checked) CMP.add(el.value); else CMP.delete(el.value);
+    renderEval();
+  });
   $("e-metric").innerHTML = (EVAL.metrics || []).map(m => `<option>${esc(m)}</option>`).join("");
   const pref = (EVAL.metrics || []).indexOf("task_completion");
   if (pref >= 0) $("e-metric").selectedIndex = pref;
   renderEval();
 }
-["e-map", "e-n", "e-env", "e-planner", "e-tag", "e-alloc", "e-metric", "e-log"]
-  .forEach(id => $(id).onchange = renderEval);
+["e-map", "e-n", "e-env", "e-planner", "e-tag", "e-alloc", "e-trained", "e-exre", "e-arrival",
+ "e-metric", "e-log"].forEach(id => $(id).onchange = renderEval);
+
+// 評価の条件を作っている要素。[キー, 見出し, 表示する値]
+// 比較の選択欄・比較表の列と行・絞り込みで共通に使う
+const EVAL_FACTORS = [
+  ["map", "map", d => d.map],
+  ["n", "N", d => String(d.n)],
+  ["env", "env", d => d.env],
+  ["planner", "planner", d => d.planner],
+  ["method_tag", "tag", d => d.method_tag || "-"],
+  ["allocator", "alloc", d => d.allocator],
+  ["reassign", "trained", d => d.reassign || "base"],
+  ["env_reassign", "exec reassign", d => d.env_reassign ? "T" : "F"],
+  ["arrival", "arrival", d => d.arrival || "fixed"],
+  ["dynamic", "dyn", d => d.dynamic ? "T" : "F"],
+];
+const EF = Object.fromEntries(EVAL_FACTORS.map(([k, , f]) => [k, f]));
+// 比較表で、値が同じでも行の見出しに必ず出す要素 (基本の要素)
+const EVAL_BASE = ["map", "n", "env", "planner", "method_tag", "allocator"];
+const CMP = new Set();            // 比較に選んでいる要素のキー
+// "5" と "10"、"bern0.05" と "bern0.1" を数の大きさの順に並べる
+const natCmp = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true });
 
 function evalRows() {
   const g = id => $(id).value;
@@ -569,13 +611,27 @@ function evalRows() {
     (!g("e-env") || d.env === g("e-env")) &&
     (!g("e-planner") || d.planner === g("e-planner")) &&
     (!g("e-tag") || d.method_tag === g("e-tag")) &&
-    (!g("e-alloc") || d.allocator === g("e-alloc")));
+    (!g("e-alloc") || d.allocator === g("e-alloc")) &&
+    (!g("e-trained") || EF.reassign(d) === g("e-trained")) &&
+    (!g("e-exre") || EF.env_reassign(d) === g("e-exre")) &&
+    (!g("e-arrival") || EF.arrival(d) === g("e-arrival")));
 }
 window.evalSortBy = k => {
   if (evalSortCol === k) evalSortAsc = !evalSortAsc;
   else { evalSortCol = k; evalSortAsc = true; }
   renderEval();
 };
+
+// 比べるための列。**表示している結果の中で値が 2 通り以上あるときだけ**出す
+// (1 通りしか無ければ比べる対象ではないので出さない。絞り込みを変えると列も変わる)。
+// map / N / env / planner / tag / alloc の基本の列は、値が同じでも常に出す
+// [キー, 見出し, 表示する値]
+const EVAL_OPT_COLS = [
+  ["reassign", "trained", d => d.reassign || "base"],
+  ["env_reassign", "exec reassign", d => d.env_reassign ? "T" : "F"],
+  ["arrival", "arrival", d => d.arrival || "fixed"],
+  ["dynamic", "dyn", d => d.dynamic ? "T" : "F"],
+];
 
 function renderEval() {
   if (!EVAL || !EVAL.available) return;
@@ -590,9 +646,16 @@ function renderEval() {
     });
   }
   $("e-counts").textContent = rows.length + " 条件";
+  const opt = EVAL_OPT_COLS.filter(c => new Set(rows.map(c[2])).size > 1);
+  if (CMP.size) {                  // 比較する要素が選ばれていれば比較表にする
+    renderCompare(rows, metric, EVAL_FACTORS.filter(f => CMP.has(f[0])));
+    drawChart(rows, metric, opt);
+    return;
+  }
 
   const cols = [["map", "map"], ["n", "N"], ["env", "env"], ["planner", "planner"],
-                ["method_tag", "tag"], ["allocator", "alloc"], ["metric", metric]];
+                ["method_tag", "tag"], ["allocator", "alloc"],
+                ...opt.map(c => [c[0], c[1]]), ["metric", metric]];
   $("e-tbl").innerHTML =
     "<tr>" + cols.map(([k, l]) =>
       `<th class="sortable${["n", "metric"].includes(k) ? " num" : ""}" onclick="evalSortBy('${k}')">${esc(l)}${evalSortCol === k ? (evalSortAsc ? " ▲" : " ▼") : ""}</th>`).join("")
@@ -602,22 +665,67 @@ function renderEval() {
       const cls = st.n === 1 ? "one" : (st.n < 5 ? "thin" : "");
       return `<tr><td>${esc(d.map)}</td><td class="num">${d.n}</td><td>${esc(d.env)}</td>
         <td>${esc(d.planner)}</td><td>${esc(d.method_tag || "-")}</td>
-        <td>${esc(d.allocator)}</td>
+        <td>${esc(d.allocator)}</td>${
+        opt.map(c => `<td>${esc(c[2](d))}</td>`).join("")}
         <td class="num">${num(st.mean)} ± ${num(st.std)}</td>
         <td class="num ${cls}">${st.n == null ? "-" : st.n}</td>
         <td class="mut">${esc((st.per_seed || []).map(v => num(v)).join("  "))}</td></tr>`;
     }).join("");
-  drawChart(rows, metric);
+  drawChart(rows, metric, opt);
 }
 
-function drawChart(rows, metric) {
+// 比較表: 比べる要素の値 (の組み合わせ) を列に、それ以外の要素が同じ条件を 1 行にまとめる。
+// 行の見出しには、基本の要素と、表示中に 2 通り以上ある要素を出す (同じ値しか無い要素は省く)
+function renderCompare(rows, metric, cmpF) {
+  const cmpKeys = cmpF.map(f => f[0]);
+  const rowF = EVAL_FACTORS.filter(f => !cmpKeys.includes(f[0]) &&
+    (EVAL_BASE.includes(f[0]) || new Set(rows.map(f[2])).size > 1));
+  const colKey = d => cmpF.map(f => f[2](d)).join(" / ");
+  const rowKey = d => rowF.map(f => f[2](d)).join("\u0001");
+  const cols = [...new Set(rows.map(colKey))].sort(natCmp);
+  const groups = new Map();
+  rows.forEach(d => {
+    const k = rowKey(d);
+    if (!groups.has(k)) groups.set(k, { d, cells: {} });
+    groups.get(k).cells[colKey(d)] = d;
+  });
+  const keys = [...groups.keys()].sort(natCmp);
+  const cell = d => {
+    const st = d && d.metrics[metric];
+    if (!st || st.mean == null) return null;
+    return st;
+  };
+  $("e-tbl").innerHTML =
+    "<tr>" + rowF.map(f => `<th>${esc(f[1])}</th>`).join("")
+    + cols.map(c => `<th class="cmpcol num" title="${esc(cmpF.map(f => f[1]).join(" / "))}">${esc(c)}</th>`).join("")
+    + "</tr>"
+    + keys.map(k => {
+      const g = groups.get(k);
+      const sts = cols.map(c => cell(g.cells[c]));
+      // 行の中で平均が一番大きいものを太字にする (指標によっては小さい方が良いので、目安として)
+      const means = sts.filter(Boolean).map(st => st.mean);
+      const best = means.length > 1 ? Math.max(...means) : null;
+      return "<tr>" + rowF.map(f => `<td>${esc(f[2](g.d))}</td>`).join("")
+        + sts.map(st => st
+          ? `<td class="cmpcell${st.mean === best ? " best" : ""}"`
+            + ` title="per-seed: ${esc((st.per_seed || []).map(v => num(v)).join("  "))}">`
+            + `${num(st.mean)}${st.std == null ? "" : " ± " + num(st.std)}`
+            + ` <span class="mut ${st.n === 1 ? "one" : (st.n < 5 ? "thin" : "")}">(${st.n})</span></td>`
+          : `<td class="cmpcell mut">-</td>`).join("")
+        + "</tr>";
+    }).join("");
+}
+
+function drawChart(rows, metric, opt) {
   const host = $("e-chart"), log = $("e-log").checked;
   const pts = [];
   rows.forEach(d => {
     const st = d.metrics[metric];
     if (st && st.mean != null)
       pts.push({ x: d.n, mean: st.mean, per: st.per_seed || [],
-                 key: `${d.planner}${d.method_tag ? "_" + d.method_tag : ""}/${d.allocator}` });
+                 // 表に出している違い (再割当・到着など) も系列の名前に入れる。入れないと別の条件の点が 1 本の線に混ざる
+                 key: `${d.planner}${d.method_tag ? "_" + d.method_tag : ""}/${d.allocator}`
+                      + (opt || []).map(c => "/" + c[2](d)).join("") });
   });
   if (!pts.length) { host.innerHTML = ""; return; }
 
@@ -781,6 +889,168 @@ function restoreNoteFocus(keep) {
   el.focus();
   try { el.setSelectionRange(keep.s, keep.e); } catch (err) { /* 型が違えば諦める */ }
 }
+
+// 条件内で割れているパラメータの表。**どの設定の組が正しいか**を見出しに出す。
+// 基準 = 学習を完了した (数えてよい) run がいちばん多い組。同数なら run の総数、
+// それでも同じなら決めない (どちらも「?」)。列ごとに状態別の本数を添えるので、
+// 「失敗した run だけが違う設定」なのか「完了した run どうしで割れている」のかが分かる
+function splitTable(c) {
+  const hs = c.param_hashes || [];
+  const runs = (c.slots || []).map(s => s.run).filter(Boolean);
+  const stat = hs.map(h => {
+    const rs = runs.filter(r => r.param_hash === h.hash);
+    const n = st => rs.filter(r => r.state === st).length;
+    return { done: rs.filter(r => r.state === "done" && !r.excluded).length,
+             total: h.seeds.length, running: n("running"),
+             bad: rs.filter(r => r.state !== "done" && r.state !== "running").length };
+  });
+  const score = x => [x.done, x.total];
+  let ref = -1;
+  stat.forEach((x, i) => {
+    if (ref < 0 || score(x)[0] > score(stat[ref])[0]
+        || (score(x)[0] === score(stat[ref])[0] && x.total > stat[ref].total)) ref = i;
+  });
+  // 1 位が同点なら基準を決めない
+  if (ref >= 0 && stat.some((x, i) => i !== ref && x.done === stat[ref].done
+                                     && x.total === stat[ref].total)) ref = -1;
+  const head = (h, i) => {
+    const x = stat[i];
+    const tag = ref < 0 ? `<span class="wrn">? 同数</span>`
+      : (i === ref ? `<span class="c-ok">✔ 基準 (多数派)</span>`
+                   : `<span class="err">✖ 違う</span>`);
+    const cnt = [`完了 ${x.done}`, x.running ? `実行中 ${x.running}` : "",
+                 x.bad ? `失敗・停止 ${x.bad}` : ""].filter(Boolean).join(" / ");
+    return `<th title="seed: ${esc(h.seeds.join(", "))}">${tag}<br>`
+         + `<span class="mut">${esc(h.hash)} · ${x.total} seed</span><br>`
+         + `<span class="mut">${cnt}</span></th>`;
+  };
+  const cell = (v, i) => {
+    const txt = v === "-" ? `<span title="この run の config にこのキーが無い (古い版で学習した run)">(キー無し)</span>`
+                          : esc(v);
+    const cls = ref < 0 ? "" : (i === ref ? "c-ok" : "wrn");
+    return `<td class="${cls}">${txt}</td>`;
+  };
+  return `<table class="pdiff"><tr><th>key</th>${hs.map(head).join("")}</tr>`
+    + c.param_diff.map(d => `<tr><td>${esc(d.key)}</td>${d.vals.map(cell).join("")}</tr>`).join("")
+    + `</table>`;
+}
+
+// ── 稼働状況 (CPU / メモリ / GPU) ─────────────────────────────────────
+// collect_runs.host_stats() が収集のたびに測る値。**マシン全体 (全アカウント)** の合計で、
+// 共有マシンで他の人が使っている分も含む。「空き」を見て、あと何本回すかを決める
+const pctCls = v => v == null ? "mut" : (v >= 90 ? "err" : (v >= 60 ? "wrn" : "c-ok"));
+const meter = (v, txt) => v == null ? `<span class="mut">-</span>`
+  : `<span class="pb" title="${Math.round(v)}%"><i class="${pctCls(v)}" style="width:${Math.min(100, v)}%"></i></span>`
+    + ` <span class="${pctCls(v)}">${Math.round(v)}%</span>${txt ? ` <span class="mut sm">${txt}</span>` : ""}`;
+const gb = mb => mb == null ? "?" : (mb / 1024).toFixed(1);
+
+function renderLoad() {
+  const H = TRAIN.host_stats || {};
+  const ks = Object.keys(H).sort();
+  if (!ks.length) {
+    $("t-load").innerHTML = `<tr><td class="mut">まだ値がありません (次の収集で入ります)</td></tr>`;
+    return;
+  }
+  const now = Date.now();
+  $("t-load").innerHTML =
+    "<tr><th>machine</th><th>いつの値か</th><th>CPU</th><th>メモリ</th>"
+    + "<th>GPU 使用率</th><th>VRAM</th><th>空き</th><th class=\"num\">自分の学習</th></tr>"
+    + ks.map(k => {
+      const h = H[k];
+      const age = h.at ? (now - Date.parse(h.at)) / 1000 : null;
+      const memPct = h.mem_total_mb ? 100 * h.mem_used_mb / h.mem_total_mb : null;
+      const g = (h.gpus || [])[0];
+      const vPct = g && g.mem_total_mb ? 100 * g.mem_used_mb / g.mem_total_mb : null;
+      // 空き: 何本足せるかの判断材料。CPU は「使われていないコア数」に直す
+      const idleCores = h.cpu_pct == null || !h.cpu_count ? null
+        : h.cpu_count * (100 - h.cpu_pct) / 100;
+      const free = [
+        idleCores == null ? "" : `CPU ${idleCores.toFixed(1)} / ${h.cpu_count} コア`,
+        h.mem_total_mb ? `メモリ ${gb(h.mem_total_mb - h.mem_used_mb)} GB` : "",
+        g ? `VRAM ${gb(g.mem_total_mb - g.mem_used_mb)} GB` : "",
+      ].filter(Boolean).join(" / ");
+      // 自分の学習 1 本あたりの VRAM (取れるマシンだけ)。空き VRAM と比べて足せる本数の目安にする
+      const per = h.gpu_mem_mine_mb != null && h.train_procs
+        ? ` <span class="mut sm" title="このリポジトリの学習 1 本あたりの VRAM">(1 本 ${gb(h.gpu_mem_mine_mb / h.train_procs)} GB)</span>` : "";
+      return `<tr><td>${esc(k)}</td>
+        <td class="${age != null && age > 3600 ? "err" : "mut"}">${age == null ? "-" : dur(age) + " 前"}</td>
+        <td>${meter(h.cpu_pct, h.load1 != null ? `load ${h.load1}` : "")}</td>
+        <td>${meter(memPct, h.mem_total_mb ? `${gb(h.mem_used_mb)} / ${gb(h.mem_total_mb)} GB` : "")}</td>
+        <td>${g ? meter(g.util, `${Math.round(g.temp)}°C`) : `<span class="mut">GPU なし</span>`}</td>
+        <td>${g ? meter(vPct, `${gb(g.mem_used_mb)} / ${gb(g.mem_total_mb)} GB`) : ""}</td>
+        <td>${esc(free)}</td>
+        <td class="num">${h.train_procs ?? "-"}${per}</td></tr>`;
+    }).join("");
+}
+
+// ── パラメータの警告 (一覧) ─────────────────────────────────────────
+// 条件の表では、警告が各条件の行に散っていて見落とす。ここに集めて上に出す。
+// 中身の判定は表と同じ (5 seed そろった条件の params✗ は出さない)。
+// 条件名を押すと、表のその条件の差分パネルを開いてそこへ移動する
+function renderParamWarn(W) {
+  $("t-warn-h").hidden = !W.length;
+  $("t-warn-n").textContent = W.length ? `${W.length} 件` : "";
+  if (!W.length) { $("t-warn").innerHTML = ""; return; }
+  const ALGO = a => String(a || "").toUpperCase();
+  const cond = c => `<span class="attmain">${esc(c.map)} ${c.agents}台 ${esc(ALGO(c.algo))}</span>`
+    + ` <span class="mut"><b>env:</b>${esc(c.setting)}</span>`
+    + ` <span class="mut"><b>到着:</b>${esc(c.task_arrival)}</span>`
+    + ` <span class="mut"><b>割当:</b>${esc(c.task_assign || "TP")}</span>`
+    + (c.reassign ? ` <span class="mut"><b>再割当</b>あり</span>` : "")
+    + (c.dynamic ? ` <span class="mut"><b>動的台数</b>あり</span>` : "");
+  $("t-warn").innerHTML =
+    "<tr><th>種類</th><th>計画</th><th>条件</th><th>違うパラメータ</th></tr>"
+    + W.map(w => {
+      const c = w.c;
+      let kind, keys;
+      if (w.kind === "split") {
+        // 条件の中で seed ごとに設定が割れている。値はハッシュ (= 設定の組) ごとに並べる
+        kind = `<span class="wrn" title="同じ条件の seed どうしで設定が違います">params✗ 条件内で割れ</span>`;
+        keys = splitTable(c);
+      } else {
+        kind = `<span class="wrn" title="表の他の条件 (同じ algo・dynamic) と設定が違います。5 seed には数えたままです">他の条件と違う</span>`;
+        keys = w.G.map(x => `<div><b>${esc(x.key)}</b> `
+          + `この条件 <span class="wrn">✖ ${esc(fmtVal(x.actual))}</span>`
+          + ` <span class="mut">(${x.n_this} run)</span>`
+          + ` ／ 他の条件の多数派 <span class="c-ok">✔ ${esc(fmtVal(x.expected))}</span>`
+          + ` <span class="mut">(${x.n_major}/${x.n_group} run)</span>`
+          + ` <button type="button" class="ack" data-dismiss="${esc(x.dismiss_key)}"`
+          + ` title="この差は意図したものなので警告を消す">問題なし</button></div>`).join("");
+      }
+      return `<tr><td>${kind}</td><td class="mut">${esc(c.plan || "")}</td>
+        <td><span class="goto" role="button" tabindex="0" data-wopen="${w.n}"
+             title="表のこの条件へ移動して差分を開く">${cond(c)}</span></td>
+        <td class="wkeys">${keys}</td></tr>`;
+    }).join("");
+}
+
+// 一覧の条件名 → 表の差分パネルを開いて移動。data-wopen は表の data-diff と同じ通し番号
+function openWarnRow(el) {
+  const n = el.getAttribute("data-wopen");
+  const row = document.querySelector('tr.diffrow[data-n="' + n + '"]');
+  if (!row) return;
+  row.hidden = false;
+  OPEN_DIFF.add(row.getAttribute("data-key"));
+  document.querySelectorAll('[data-diff="' + n + '"]')
+    .forEach(b => b.setAttribute("aria-expanded", "true"));
+  // 差分パネルの 1 つ上が条件行。見出しが sticky なので center に寄せる
+  const target = row.previousElementSibling || row;
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  document.querySelectorAll("tr.flash").forEach(t => t.classList.remove("flash"));
+  target.classList.add("flash");
+  setTimeout(() => target.classList.remove("flash"), 2000);
+}
+document.addEventListener("click", ev => {
+  const el = ev.target.closest && ev.target.closest("[data-wopen]");
+  if (el) openWarnRow(el);
+});
+document.addEventListener("keydown", ev => {
+  if (ev.key !== "Enter" && ev.key !== " ") return;
+  const el = ev.target.closest && ev.target.closest("[data-wopen]");
+  if (!el) return;
+  ev.preventDefault();
+  openWarnRow(el);
+});
 
 // ── 要確認 (異常終了) ───────────────────────────────────────────────
 // running now の下に置く。OK を押すとサーバ側 (tools/.acked_runs.json) に

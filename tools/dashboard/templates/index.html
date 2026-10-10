@@ -33,7 +33,7 @@
     <span><label>algo</label><select id="t-algo"></select></span>
     <span><label>arrival</label><select id="t-arrival"></select></span>
     <span><label>assign</label><select id="t-assign"></select></span>
-    <span><label>dynamic</label><select id="t-dynamic"></select></span>
+    <span><label>reassign</label><select id="t-reassign"></select></span>
     <span><label>状態</label><select id="t-state">
       <option value="">(all)</option><option>done</option><option>running</option>
       <option>stalled</option><option>failed</option><option>short</option>
@@ -43,8 +43,16 @@
 
   <div id="t-stale"></div>
 
+  <!-- 条件の表に散っているパラメータの警告 (params✗ / 他と違う) を 1 か所に集めたもの -->
+  <h2 id="t-warn-h" hidden>パラメータの警告 <span class="mut sm" id="t-warn-n"></span></h2>
+  <div class="wrap"><table id="t-warn"></table></div>
+
   <h2>machines</h2>
   <div class="wrap"><table id="t-mach"></table></div>
+
+  <!-- マシン全体 (全アカウント合計) の使用状況。収集のたびに更新される -->
+  <h2>稼働状況 <span class="mut sm">全アカウントの合計</span></h2>
+  <div class="wrap"><table id="t-load"></table></div>
 
   <h2>running now</h2>
   <div class="wrap"><table id="t-run"></table></div>
@@ -65,9 +73,16 @@
     <span><label>planner</label><select id="e-planner"></select></span>
     <span><label>tag</label><select id="e-tag"></select></span>
     <span><label>alloc</label><select id="e-alloc"></select></span>
+    <span><label>trained</label><select id="e-trained"></select></span>
+    <span><label>exec reassign</label><select id="e-exre"></select></span>
+    <span><label>arrival</label><select id="e-arrival"></select></span>
     <span><label>metric</label><select id="e-metric"></select></span>
     <span><label><input type="checkbox" id="e-log"> log 軸</label></span>
     <span class="right mut" id="e-counts"></span>
+  </div>
+  <div class="bar filters">
+    <label>比較</label><span id="e-cmp"></span>
+    <span class="mut">選んだ要素の値を列に並べて比べる (複数選ぶと組み合わせ)。何も選ばなければ一覧</span>
   </div>
   <div id="e-chart"></div>
   <div class="wrap"><table id="e-tbl"></table></div>

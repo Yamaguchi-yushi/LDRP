@@ -195,6 +195,27 @@ HASH_DEPENDENT = (
 )
 
 
+# drp_env.DrpEnv.__init__ の reward_list の既定値。train.py は reward_list を渡して
+# いないので、config にキーが無い run はこの値で学習している
+DEFAULT_REWARD_LIST = {"goal": 100, "collision": -10, "wait": -10, "move": -1}
+
+
+def _norm_reward_list(v):
+    """reward_list を比べられる形にする. 既定値と同じなら None (= キーが無い run と同一視).
+
+    sacred には書いたままの数が残るので、-10 と -10. を同じ値にするため float にそろえる。
+    """
+    if not isinstance(v, dict):
+        return v
+    try:
+        v = dict((k, float(x)) for k, x in v.items())
+    except (TypeError, ValueError):
+        return v
+    if v == dict((k, float(x)) for k, x in DEFAULT_REWARD_LIST.items()):
+        return None
+    return v
+
+
 def param_fields(cfg_full, env_full):
     """実験条件として意味を持つパラメータだけに正規化した dict を返す.
 
@@ -214,6 +235,14 @@ def param_fields(cfg_full, env_full):
     if env.get("randomize_task_arrival"):
         for k in ("task_arrival", "task_density"):
             env.pop(k, None)
+    # 環境報酬 (goal / collision / wait / move)。既定値から変えた run だけキーが残り、
+    # 同じ条件の他の seed や他の条件と違えば params✗ / 他と違う の警告になる
+    if "reward_list" in env:
+        rl = _norm_reward_list(env.get("reward_list"))
+        if rl is None:
+            env.pop("reward_list")
+        else:
+            env["reward_list"] = rl
     # max_active_agents は「開始時に稼働台数を引くときの上限」で、env が台数 N
     # (環境名の drp_safe-{N}agent) に丸める。未指定 (None) も N 以上も挙動は同じ
     # (drp_env.py の reset: hi = agent_num if max is None else min(agent_num, max))。
@@ -675,9 +704,17 @@ def find_training_proc(cfg, env, start_time):
     if t0 is not None:
         timed = [p for p in cand if p["start"] is not None]
         if timed:
-            best = min(timed, key=lambda p: abs(p["start"] - t0))
-            if abs(best["start"] - t0) > 900:
-                # 起動時刻が 15 分以上ずれている = 別の run のプロセス。当て推量はしない
+            # 学習プロセスは sacred の run より**先に**起動する。環境の準備に時間がかかると
+            # 差が大きくなる (GPU2 の mappo aoba00 7 台 32 並列で 51 分の実測、2026-10-07)。
+            # 以前は「前後 15 分以内」で判定していて、この run を見落としていた。
+            # run より後に起動したプロセス (= 別の run) を除き、その中で一番遅く起動したもの
+            # (= run の開始に一番近いもの) を採る
+            before = [p for p in timed if p["start"] <= t0 + 60]
+            if not before:
+                return None
+            best = max(before, key=lambda p: p["start"])
+            if t0 - best["start"] > 6 * 3600:
+                # 6 時間以上前に起動したプロセス = 別の run のもの。当て推量はしない
                 return None
     return best
 
@@ -809,6 +846,200 @@ def scan_batches(machine):
     return out
 
 
+def _run_text(cmd, timeout=10):
+    """コマンドの標準出力を文字列で返す. 無い・失敗したら None (止まらない)."""
+    try:
+        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL,
+                                       timeout=timeout).decode("utf-8", "replace")
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+
+
+def _cpu_times():
+    """/proc/stat の全 CPU 合計 (busy, total). Linux 以外は None."""
+    try:
+        with open("/proc/stat") as f:
+            v = [int(x) for x in f.readline().split()[1:]]
+    except (IOError, OSError, ValueError):
+        return None
+    idle = v[3] + (v[4] if len(v) > 4 else 0)          # idle + iowait
+    return sum(v) - idle, sum(v)
+
+
+def _my_train_pids(repos):
+    """このリポジトリで動いている学習 (epymarl の main.py) と、その子プロセスの PID.
+
+    GPU2 は研究室で 1 つのアカウントを共有しているので、ユーザー名では
+    自分の学習を見分けられない。**作業ディレクトリがこのリポジトリの中**かで判定する。
+    子プロセス (parallel runner の環境ワーカー) も CPU を食うので一緒に数える。
+    Linux (/proc) 以外では、自分のユーザーの main.py を数えるだけにする。
+    返り値: (main.py の PID の集合, 子も含めた PID の集合)
+    """
+    roots = [os.path.realpath(os.path.expanduser(r)) for r in repos or []]
+    if not os.path.isdir("/proc"):
+        out = _run_text(["ps", "-U", str(os.getuid()), "-o", "pid=,args="]) or ""
+        mains = set()
+        for ln in out.splitlines():
+            f = ln.split(None, 1)
+            if len(f) == 2 and "main.py" in f[1] and "epymarl" in f[1]:
+                mains.add(int(f[0]))
+        return mains, set(mains)
+    parent, mains = {}, set()
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            with open("/proc/%d/stat" % pid) as f:
+                st = f.read()
+            parent[pid] = int(st[st.rfind(")") + 2:].split()[1])
+            with open("/proc/%d/cmdline" % pid, "rb") as f:
+                argv = f.read().decode("utf-8", "replace").split("\0")
+            # train.py は "/bin/sh -c python ... main.py" で起動するので、
+            # sh ではなく python 本体だけを数える
+            if not (os.path.basename(argv[0]).startswith("python")
+                    and any(a.endswith("main.py") for a in argv[1:3])):
+                continue
+            cwd = os.path.realpath("/proc/%d/cwd" % pid)
+        except (IOError, OSError, ValueError, IndexError):
+            continue
+        if any(cwd == r or cwd.startswith(r + os.sep) for r in roots):
+            mains.add(pid)
+    # fork した環境ワーカーも親と同じ cmdline (main.py) を持つ。
+    # 親が main.py でないものだけを「学習 1 本」と数える
+    allp = set(mains)
+    mains = set(p for p in mains if parent.get(p) not in mains)
+    for pid in parent:
+        q, seen = pid, 0
+        while q in parent and q not in allp and seen < 50:
+            q, seen = parent[q], seen + 1
+        if q in allp:
+            allp.add(pid)
+    return mains, allp
+
+
+def host_stats(machine, repos=None):
+    """このマシンの CPU / メモリ / GPU の使用状況 ({"kind": "host"} レコード).
+
+    測り方は GPU 側にある sysstat.sh と同じ (nvidia-smi / /proc/stat / meminfo)。
+    共有マシンなので「このリポジトリの学習」とそれ以外を分けて数える。
+    これがあると「あと何本回せるか」を白のダッシュボードで見積もれる。
+    どの値も取れなければ None のまま返す (収集そのものは止めない)。
+    """
+    mains, mine = _my_train_pids(repos)
+    st = {"kind": "host", "uid": "host:%s" % machine, "machine": machine,
+          "at": datetime.utcnow().isoformat() + "+00:00",
+          "cpu_count": os.cpu_count(), "load1": None, "cpu_pct": None,
+          "cpu_pct_mine": None, "mem_total_mb": None, "mem_used_mb": None,
+          "train_procs": len(mains), "gpus": [],
+          "gpu_mem_mine_mb": None, "gpu_mem_others_mb": None}
+    try:
+        st["load1"] = round(os.getloadavg()[0], 2)
+    except (OSError, AttributeError):
+        pass
+
+    # CPU 使用率 (全体): /proc/stat を 0.5 秒あけて 2 回読んだ差 (その瞬間の値)
+    a = _cpu_times()
+    if a:
+        time.sleep(0.5)
+        b = _cpu_times()
+        if b and b[1] > a[1]:
+            st["cpu_pct"] = round(100.0 * (b[0] - a[0]) / (b[1] - a[1]), 1)
+    # 自分の学習の CPU。top の 2 回目の表示 (= 直近 0.5 秒の値) を使う。
+    # ps の %CPU は起動からの平均なので、長く回している学習では実態とずれる
+    out = _run_text(["top", "-b", "-n", "2", "-d", "0.5", "-w", "200"]) if mine else None
+    if out and "PID" in out:
+        lines = out[out.rfind("PID"):].splitlines()
+        head = lines[0].split()
+        if "%CPU" in head and head[0] == "PID":
+            i = head.index("%CPU")
+            tot = 0.0
+            for ln in lines[1:]:
+                f = ln.split()
+                try:
+                    if len(f) > i and int(f[0]) in mine:
+                        tot += float(f[i].replace(",", "."))
+                except ValueError:
+                    pass
+            if st["cpu_count"]:
+                st["cpu_pct_mine"] = round(tot / st["cpu_count"], 1)   # 全体比の %
+
+    # mac には /proc も top -b も無い。ps の %CPU (mac では直近の減衰平均) で代える
+    if st["cpu_pct"] is None and st["cpu_count"]:
+        out = _run_text(["ps", "-A", "-o", "pid=,%cpu="])
+        if out:
+            tot = mtot = 0.0
+            for ln in out.splitlines():
+                f = ln.split()
+                try:
+                    v = float(f[1].replace(",", "."))
+                except (ValueError, IndexError):
+                    continue
+                tot += v
+                if int(f[0]) in mine:
+                    mtot += v
+            st["cpu_pct"] = round(min(100.0, tot / st["cpu_count"]), 1)
+            st["cpu_pct_mine"] = round(mtot / st["cpu_count"], 1)
+
+    # メモリ: Linux は /proc/meminfo、mac は sysctl + vm_stat
+    try:
+        with open("/proc/meminfo") as f:
+            mi = dict((l.split(":")[0], int(l.split()[1])) for l in f if ":" in l)
+        st["mem_total_mb"] = mi["MemTotal"] // 1024
+        st["mem_used_mb"] = (mi["MemTotal"] - mi.get("MemAvailable", mi.get("MemFree", 0))) // 1024
+    except (IOError, OSError, KeyError, ValueError, IndexError):
+        tot = _run_text(["sysctl", "-n", "hw.memsize"])
+        vm = _run_text(["vm_stat"])
+        if tot and vm:
+            try:
+                page = int(re.search(r"page size of (\d+)", vm).group(1))
+                cnt = dict((k.strip(), int(v.strip().rstrip(".")))
+                           for k, v in (l.split(":") for l in vm.splitlines()[1:] if ":" in l))
+                free = (cnt.get("Pages free", 0) + cnt.get("Pages inactive", 0)
+                        + cnt.get("Pages speculative", 0)) * page
+                st["mem_total_mb"] = int(tot) // (1 << 20)
+                st["mem_used_mb"] = (int(tot) - free) // (1 << 20)
+            except (AttributeError, ValueError):
+                pass
+
+    # GPU: 全体の使用率と VRAM。WSL2 (GPU2) では nvidia-smi が PATH に無いので、
+    # sysstat.sh と同じ場所を見る
+    nvsmi = "nvidia-smi"
+    if os.path.exists("/usr/lib/wsl/lib/nvidia-smi"):
+        nvsmi = "/usr/lib/wsl/lib/nvidia-smi"
+    out = _run_text([nvsmi, "--query-gpu=index,name,utilization.gpu,"
+                     "memory.used,memory.total,temperature.gpu",
+                     "--format=csv,noheader,nounits"])
+    for ln in (out or "").splitlines():
+        f = [x.strip() for x in ln.split(",")]
+        if len(f) < 6:
+            continue
+        try:
+            st["gpus"].append({"index": int(f[0]), "name": f[1], "util": float(f[2]),
+                               "mem_used_mb": float(f[3]), "mem_total_mb": float(f[4]),
+                               "temp": float(f[5])})
+        except ValueError:
+            continue
+    # プロセスごとの VRAM。WSL2 では "[N/A]" になり分けられない (その場合は None のまま)
+    out = _run_text([nvsmi, "--query-compute-apps=pid,used_memory",
+                     "--format=csv,noheader,nounits"])
+    mine_mb, others_mb, ok = 0.0, 0.0, False
+    for ln in (out or "").splitlines():
+        f = [x.strip() for x in ln.split(",")]
+        try:
+            pid, mb = int(f[0]), float(f[1])
+        except (ValueError, IndexError):
+            continue
+        ok = True
+        if pid in mine:
+            mine_mb += mb
+        else:
+            others_mb += mb
+    if ok:
+        st["gpu_mem_mine_mb"], st["gpu_mem_others_mb"] = mine_mb, others_mb
+    return st
+
+
 def iter_run_dirs(sacred_root):
     """<sacred_root>/<algo>/<env_key>/<run_id>/ を列挙する."""
     if not os.path.isdir(sacred_root):
@@ -829,7 +1060,7 @@ def iter_run_dirs(sacred_root):
 
 
 def scan(repos, sacred_subdirs, machine, tail_bytes, emit, model_subdirs=None,
-         curve_metrics=None, curve_max_points=0, tb_subdirs=None):
+         curve_metrics=None, curve_max_points=0, tb_subdirs=None, with_host=True):
     """repos 配下を走査し、レコードを 1 件ずつ emit に渡す (溜め込まない).
 
     curve_metrics を渡すと、学習曲線も {"kind":"curve"} レコードとして emit する。
@@ -838,6 +1069,11 @@ def scan(repos, sacred_subdirs, machine, tail_bytes, emit, model_subdirs=None,
     """
     for b in scan_batches(machine):
         emit(b)
+    try:
+        if with_host:
+            emit(host_stats(machine, repos))
+    except Exception as e:                    # 稼働率が取れなくても run の収集は続ける
+        sys.stderr.write("[host] %s: %s\n" % (type(e).__name__, e))
     n = 0
     for repo in repos:
         repo = os.path.abspath(os.path.expanduser(repo))
@@ -1114,7 +1350,14 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
 
     # task arrival 列
     if env.get("randomize_task_arrival"):
-        d["task_arrival"] = "bernoulli, mmpp"
+        # 学習時の bernoulli p の範囲 U(rand_p_min, rand_p_max) を必ず付ける。
+        # 範囲を変えた学習 (plan_arrival_range.md) と区別するため。
+        # キーが無い古い run は drp_env の既定 (0.01, 0.10) で回っている
+        lo = env.get("rand_p_min")
+        hi = env.get("rand_p_max")
+        lo = 0.01 if lo is None else float(lo)
+        hi = 0.10 if hi is None else float(hi)
+        d["task_arrival"] = "bernoulli, mmpp p=%.2f-%.2f" % (lo, hi)
     else:
         d["task_arrival"] = str(env.get("task_arrival") or "")
 
@@ -1283,7 +1526,10 @@ def collect_local(host, tail_bytes, curves=None, curve_max_points=0):
          host["label"], tail_bytes, recs.append,
          model_subdirs=host.get("model_subdirs") or list(DEFAULT_MODEL_SUBDIRS),
          curve_metrics=curves, curve_max_points=curve_max_points,
-         tb_subdirs=host.get("tb_subdirs") or list(DEFAULT_TB_SUBDIRS))
+         tb_subdirs=host.get("tb_subdirs") or list(DEFAULT_TB_SUBDIRS),
+         # 返却済みマシンのバックアップ (M2) を白で読むときは、白の稼働率を
+         # M2 の値として出さない
+         with_host=host.get("host_stats", True))
     return recs, None
 
 
@@ -2192,7 +2438,7 @@ def eval_model_stem(d):
       + task_assign                       72 通り (衝突 12)
       + dynamic                           84 通り (衝突 0)  <- これ
     入れない軸と理由:
-      task_arrival  計画内は "bernoulli, mmpp" の 1 種しかない
+      task_arrival  計画内は "bernoulli, mmpp p=<下限>-<上限>" (学習時の p の範囲)
       reassign      末尾の reassign_tag で区別する (再割当ありで学習 = reassign / なし = base)
       LaRe 系列     map + N が系列を一意に決めるので method_tag で足りる
                     (計画外の系列は manifest.jsonl 側で判別する)
@@ -4534,7 +4780,7 @@ def main(argv=None):
             # (これが無いと黒 / M2 の「あと何本回すか」が白から一切見えない)
             keep = set(d["uid"] for d in rows
                        if (d.get("t_max") or 0) >= min_steps
-                       or d.get("kind") == "batch")
+                       or d.get("kind") in ("batch", "host"))
             records = [r for r in records if r["uid"] in keep]
             rows = [d for d in rows if d["uid"] in keep]
         want = set(x.strip() for x in (args.fetch_state or "done").split(",") if x.strip())
@@ -4600,7 +4846,7 @@ def main(argv=None):
     # 古い予約が残ると、終わったバッチの枠がいつまでも埋まって見える
     batches = [r for r in raw if r.get("kind") == "batch"]
     curves = [r for r in raw if r.get("kind") == "curve"]
-    raw = [r for r in raw if r.get("kind") not in ("batch", "curve")]
+    raw = [r for r in raw if r.get("kind") not in ("batch", "curve", "host")]
 
     prev_states = {}
     cache_path = os.path.expanduser(args.cache) if args.cache else None

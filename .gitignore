@@ -54,3 +54,4 @@ tools/.acked_runs.json
 tools/.param_dismissed.json
 tools/.run_excluded.json
 tools/.run_notes.json
+tools/.host_stats.json

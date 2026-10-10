@@ -64,6 +64,9 @@ EXCLUDED_SUFFIX = ".excluded"
 
 # seed ごとの手書きメモ。{uid: "本文"}。run が消えない限り残す
 NOTE_PATH = os.path.join(TOOLS, ".run_notes.json")
+# マシンごとの稼働率 (CPU / メモリ / GPU) の最新値。ダッシュボードを再起動しても
+# 直前の値を出せるようにファイルにも置く (中身は collect_runs.host_stats の戻り値)
+HOST_STATS_PATH = os.path.join(TOOLS, ".host_stats.json")
 NOTE_MAX = 300      # 表の 1 列に収まる長さ。超える分は切る
 
 # --- 全体比較 (条件をまたいで設定を比べる) ---------------------------------
@@ -73,7 +76,8 @@ NOTE_MAX = 300      # 表の 1 列に収まる長さ。超える分は切る
 #
 # 比べないキー = 条件そのものを決めるもの (条件ごとに違って当然):
 #   map / 台数 (env.key), t_max, algo (cfg.name), seed, LaRe 設定 (setting 列),
-#   タスク到着の方式 (task arrival 列), 割当学習 (task assign 列), 動的台数 (dynamic 列)
+#   タスク到着の方式 (task arrival 列), 割当学習 (task assign 列), 動的台数 (dynamic 列),
+#   学習時の再割当 (reassign 列。plan_reassign.md で条件として振っている)
 GLOBAL_SKIP_KEYS = frozenset((
     "env.key", "cfg.t_max", "cfg.name", "cfg.env_args", "cfg.seed", "env.seed",
     "env.task_arrival", "env.randomize_task_arrival",
@@ -81,6 +85,11 @@ GLOBAL_SKIP_KEYS = frozenset((
     "env.use_pretrained_lare_path", "env.pretrained_lare_path_model_name",
     "env.use_finetuning_lare_path", "env.finetuning_lare_path_model_name",
     "cfg.train_task_assigner", "env.use_dynamic_agents",
+    "env.allow_reassign_before_pickup",
+    # 学習時のタスク発生率の範囲。計画表の task arrival 列 (p=下限-上限) で
+    # 条件として振っている (plan_arrival_range.md)。MMPP の 2 相も範囲の両端にそろえる。
+    # 条件の中で割れたときの params✗ は今までどおり出る
+    "env.rand_p_min", "env.rand_p_max", "env.task_p_low", "env.task_p_high",
 ))
 GLOBAL_MIN_GROUP = 3    # 比べる相手がこれ未満なら多数派を決めない
 GLOBAL_MAJORITY = 0.5   # 多数派とみなす割合 (これ未満 = 意図的に振っているキー)
@@ -101,7 +110,18 @@ def _raw_param(d, k):
     """
     pre, key = k.split(".", 1)
     src = (d.get("cfg") or {}) if pre == "cfg" else (d.get("env") or {})
+    # 報酬を渡していない run は drp_env の既定値で学習している (「記録なし」ではない)
+    if k == "env.reward_list" and src.get(key) is None:
+        return CR.DEFAULT_REWARD_LIST
     return src.get(key)
+
+
+def _pdiff_val(key, v):
+    """条件内の差分表に出す値. "-" は画面で「キー無し (古い版)」と出る."""
+    if v is None:
+        # 報酬は既定値のとき param_fields がキーを落とす。古い版ではなく既定値
+        return str(CR.DEFAULT_REWARD_LIST) if key == "env.reward_list" else "-"
+    return str(v)
 
 
 def dismiss_key(cond, key, actual):
@@ -402,14 +422,17 @@ class State(object):
             # 同じ条件のはずなのにパラメータが割れていたら、**どのキーが違うか**を渡す。
             # ハッシュだけでは何を直せばよいか分からない
             pdiff, phashes = [], {}
-            hit_live = [d for d in hit if d["uid"] not in excl]
+            # 比べるのは **5 seed に数える run** (完了・実行中で、除外していないもの) だけ。
+            # 失敗・停止した run は数えないので、その設定が違っていても直す必要がない
+            # (odd_param_runs / 全体比較と同じ対象にそろえる)
+            hit_live = [d for d in hit if d["uid"] not in excl
+                        and d.get("state") in SLOT_STATES]
             if len(set(d.get("param_hash") for d in hit_live)) > 1:
                 diffs, seeds = CR.param_diff(hit_live)
                 order = sorted(seeds, key=lambda h: (-len(seeds[h]), str(h)))
                 phashes = [{"hash": h, "seeds": sorted(seeds[h])} for h in order]
                 pdiff = [{"key": k,
-                          "vals": ["-" if v.get(h) is None else str(v.get(h))
-                                   for h in order]}
+                          "vals": [_pdiff_val(k, v.get(h)) for h in order]}
                          for k, v in diffs]
 
             out.append({
@@ -432,6 +455,7 @@ class State(object):
             _rank(ALGO_ORDER, c["algo"]), str(c["algo"] or ""),
             str(c["task_arrival"] or ""),
             0 if not c["task_assign"] else 1, str(c["task_assign"] or ""),
+            1 if c.get("reassign") else 0,      # 再割当なし (F) を先に
             1 if c.get("dynamic") else 0,
         ))
         return out, used
@@ -440,7 +464,7 @@ class State(object):
     def train(self):
         conf = self.conf()
         raw = CR.read_cache(os.path.expanduser(self.args.cache))
-        raw = [r for r in raw if r.get("kind") != "batch"]
+        raw = [r for r in raw if r.get("kind") not in ("batch", "host")]
         stale = conf.get("stale_minutes") or 90
         rows = [CR.derive(r, stale, conf.get("method_tag_by_lare_mode"),
                           conf.get("expected_t_max"),
@@ -494,6 +518,7 @@ class State(object):
             for r in data["runs"]:
                 r["note"] = notes.get(r["uid"], "")
             data["attention"] = self.attention(data["runs"])
+            data["host_stats"] = load_json(HOST_STATS_PATH)
         return data
 
     # --- 全体比較 -------------------------------------------------------
@@ -713,7 +738,19 @@ class State(object):
                                      drop_root=conf.get("drop_root"),
                                      skip_unchanged=self.drop_mtime)
             batches = [r for r in raw if r.get("kind") == "batch"]
-            runs = [r for r in raw if r.get("kind") != "batch"]
+            hstats = [r for r in raw if r.get("kind") == "host"]
+            runs = [r for r in raw if r.get("kind") not in ("batch", "host")]
+            if hstats:
+                # 届かなかったマシンの値は前回のものを残す (いつの値かは "at" で分かる)
+                hs = load_json(HOST_STATS_PATH)
+                for h in hstats:
+                    hs[h.get("machine")] = h
+                try:
+                    with open(HOST_STATS_PATH + ".tmp", "w") as f:
+                        json.dump(hs, f, ensure_ascii=False)
+                    os.replace(HOST_STATS_PATH + ".tmp", HOST_STATS_PATH)
+                except (IOError, OSError) as e:
+                    sys.stderr.write("[host] %s\n" % e)
 
             cache = os.path.expanduser(self.args.cache)
             merged = CR.dedupe(CR.read_cache(cache) + runs)

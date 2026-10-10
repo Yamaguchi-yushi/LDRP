@@ -7,7 +7,7 @@ Notion で管理している表を**そのまま貼り付けられる**形式に
     ## 5agent   80M                     <- 見出し: 台数と t_max
     | seed | machine | setting | algorithm | task arrival | task assign | reassign |
     | --- | --- | --- | --- | --- | --- | --- |
-    |  |  | safe | MAPPO | bernoulli, mmpp | TP |  |     <- 条件行 (seed が空)
+    |  |  | safe | MAPPO | bernoulli, mmpp p=0.01-0.10 | TP |  |     <- 条件行 (seed が空)
     | 337863318 | GPU1 |  |  |  |  |  |                  <- seed 行
     | 343618845 | GPU1 |  |  |  |  |  |
 
@@ -284,6 +284,10 @@ def run_key(d):
 
 def matches(cond, d):
     """計画の 1 条件が run d に一致するか. 計画側が None の項目は問わない."""
+    # 診断用などで label を付けた run (例: label=memdebug) は、条件が同じでも計画の枠に
+    # 数えない。通常の run の label は epymarl の既定値 "default_label"
+    if ((d.get("cfg") or {}).get("label")) not in (None, "", "default_label"):
+        return False
     if cond["agents"] != d.get("agents"):
         return False
     if cond["map"] and cond["map"] != d.get("map"):

@@ -170,3 +170,22 @@ tr.excl>td:first-child,tr.excl .exltxt{text-decoration:line-through}
    (238 行に常時並ぶと状態の列が読みにくくなる) */
 .exlbtn{visibility:hidden}
 tr:hover .exlbtn,.exlbtn:focus{visibility:visible}
+
+/* 評価タブの比較表。比較の選択欄のチェックボックスと、比べる列 (値の列) を見分けやすくする */
+#e-cmp label{margin-right:10px;color:var(--fg);cursor:pointer}
+#e-tbl th.cmpcol{color:var(--run)}
+#e-tbl td.cmpcell{text-align:right;font-variant-numeric:tabular-nums}
+#e-tbl td.best{font-weight:700}
+
+/* パラメータの警告 (一覧)。キーは 1 行に 1 つ */
+#t-warn td{vertical-align:top}
+#t-warn td:not(.wkeys){white-space:nowrap}
+#t-warn .mut b,#t-warn .wkeys b{font-weight:normal;opacity:.75;margin-right:4px}
+#t-warn td span+span{margin-left:8px}
+#t-warn .wkeys div+div{margin-top:2px}
+
+/* 稼働状況のメーター。.pb (進捗バー) を流用し、色だけ使用率で変える */
+#t-load td{white-space:nowrap}
+#t-load .pb i.c-ok{background:var(--ok)}
+#t-load .pb i.wrn{background:var(--warn)}
+#t-load .pb i.err{background:var(--bad)}
