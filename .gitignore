@@ -16,6 +16,8 @@ train_results/
 # src/lare/{path,task}/checkpoints/ は autosave 出力. 大量蓄積されるので git 外.
 src/lare/path/checkpoints/
 src/lare/task/checkpoints/
+# 他のマシンから回収した LaRe-Path のモデル (tools/collect_runs.py の fetch_lare_models)
+src/lare/path/fetched/
 .claude/settings.local.json
 .claude/*.local.*
 # 旧パス saved_models/ も後方互換のためサポートしているが git 管理外

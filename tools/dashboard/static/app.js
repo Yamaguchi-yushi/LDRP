@@ -110,11 +110,25 @@ async function loadTrain() {
 ["t-plan", "t-machine", "t-map", "t-agents", "t-algo", "t-state", ...FV_IDS]
   .forEach(id => $(id).onchange = renderTrain);
 
+// SSH で繋がらないホスト。**異常ではなく「確認できない」**。表示している値は
+// 最後に見えた時点のもので、学習が止まったとは限らない
+const UNREACH = () => (TRAIN && TRAIN.unreachable) || {};
+const unkChip = (label, extra) => {
+  const u = UNREACH()[label];
+  if (!u) return "";
+  return `<span class="unk" title="${esc(label)} に接続できません (${esc(u.error || "")})。`
+    + `${when(u.since)} から確認できていません">確認できません</span>${extra || ""}`;
+};
+
 function renderStamp() {
   const s = TRAIN || {};
   $("stamp").textContent = "収集 " + when(s.collected_at) + (s.busy ? "  (収集中…)" : "");
   $("errors").innerHTML = (s.errors || [])
-    .map(e => `<div class="err">⚠ ${esc(e)}</div>`).join("");
+    .map(e => `<div class="err">⚠ ${esc(e)}</div>`).join("")
+    // 繋がらないホストは赤にしない。最後に見えた状態を出しているだけだと分かるようにする
+    + Object.entries(s.unreachable || {}).map(([k, u]) =>
+      `<div class="mut">🔌 ${esc(k)} に接続できないため、現在の状況は確認できません`
+      + ` (${when(u.since)} から)。${esc(k)} の表示は最後に確認できた時点のものです</div>`).join("");
   $("collect").disabled = !!s.busy;
 }
 
@@ -143,11 +157,23 @@ const OPEN_DIFF = new Set();
 // 全表で同じ colgroup + table-layout:fixed にして位置を固定する。
 // 幅は 2026-09 時点の実データの最大長 + 見出しの長さから決めた。状態だけ残りを取る
 // dynamic の列は出さない (どの計画も F だけ)。代わりに reassign を全部の表に出す
-const condCols = () => `<colgroup>
+// rows = その章の条件。setting が既定の幅 (22ch) に収まらない章 (LaRe の多段の系列など) は
+// setting を全部見せる幅に広げ、代わりに algorithm と task arrival を中身ぎりぎりまで詰める
+const condCols = (rows) => {
+  const len = s => [...String(s || "")].length;
+  const maxOf = (k, d) => Math.max(d, ...(rows || []).map(c => len(c[k])));
+  // ✅ の目印を付けた setting はその分 (空白 + 絵文字 = 3ch) 長く見る
+  const setLen = Math.max(0, ...(rows || []).map(c => len(c.setting) + (c.mark ? 3 : 0)));
+  const wide = setLen > 22;
+  const setW = wide ? setLen + 1 : 22;
+  const algoW = wide ? Math.max(6, maxOf("algo", 4)) : 12;
+  const arrW = wide ? Math.max(6, maxOf("task_arrival", 4)) : 28;
+  return `<colgroup>
   <col style="width:calc(12ch + 16px)"><col style="width:calc(8ch + 16px)">
-  <col style="width:calc(22ch + 16px)"><col style="width:calc(12ch + 16px)">
-  <col style="width:calc(28ch + 16px)"><col style="width:calc(12ch + 16px)">
+  <col style="width:calc(${setW}ch + 16px)"><col style="width:calc(${algoW}ch + 16px)">
+  <col style="width:calc(${arrW}ch + 16px)"><col style="width:calc(12ch + 16px)">
   <col style="width:calc(9ch + 16px)"><col></colgroup>`;
+};
 // 再割当ありの条件だけ末尾に印を足す (再割当なしは今までと同じ鍵のまま = 開閉状態などを引き継ぐ)
 const condKey = c => [c.plan, c.label, c.setting, c.algo,
                       c.task_assign || "TP", c.dynamic ? 1 : 0].join("|")
@@ -268,16 +294,19 @@ function renderTrain() {
                 + (skip ? ` (計画外の完了 ${skip} 本は対象外)` : "");
       const got = nd ? `<span class="${ns >= nd ? "c-ok" : "wrn"}" title="${esc(tip)}">${ns}/${nd}</span>`
                      : `<span class="mut" title="${esc(tip)}">-</span>`;
+      if (UNREACH()[k]) fresh = unkChip(k, b && b.data_age_sec != null
+        ? ` <span class="mut sm">最終 ${dur(b.data_age_sec)} 前</span>` : "");
       return `<tr><td>${esc(k)}</td><td>${fresh}</td><td class="num">${m.run}</td>
         <td class="num">${m.done}</td><td class="num">${got}</td>
         <td class="num ${m.bad ? "err" : "mut"}">${m.bad}</td>
-        <td class="mut">${when(m.eta)}</td></tr>`;
+        <td class="mut">${UNREACH()[k] ? "-" : when(m.eta)}</td></tr>`;
     }).join("") || `<tr><td class="mut" colspan="7">なし</td></tr>`);
 
   renderLoad();
 
   // 情報が古いホストがあれば見出しで知らせる (run の状態と混ぜない)
-  const quiet = Object.entries(TRAIN.machines || {}).filter(([, b]) => b.stale_data);
+  const quiet = Object.entries(TRAIN.machines || {})
+    .filter(([k, b]) => b.stale_data && !UNREACH()[k]);   // 繋がらないホストは上の灰色の行で知らせる
   $("t-stale").innerHTML = quiet.map(([k, b]) => {
     const norm = b.interval_sec
       ? `通常は ${dur(b.interval_sec)} 間隔で届きます。` : "";
@@ -296,11 +325,13 @@ function renderTrain() {
     "<tr><th>進捗</th><th class=\"num\">t_env</th><th class=\"num\">残り</th>"
     + "<th>終了予定</th><th>machine</th><th class=\"num\">予約</th><th>計画</th>"
     + "<th>条件</th><th>seed</th><th>経過</th><th>コメント</th></tr>"
-    + (run.length ? run.map(r => `<tr>
+    // 繋がらないホストの行は薄くし、残り・終了予定は出さない (最後に見えた値からの推測になるため)
+    + (run.length ? run.map(r => `<tr${UNREACH()[r.machine] ? ' class="unkrow"' : ""}>
         <td><span class="pb"><i style="width:${((r.progress || 0) * 100).toFixed(0)}%"></i></span>
             ${((r.progress || 0) * 100).toFixed(0)}%</td>
         <td class="mut num">${M(r.t_last)}/${M(r.t_max)}M</td>
-        <td class="num">${dur(r.remaining_sec)}</td><td>${
+        <td class="num">${UNREACH()[r.machine] ? "-" : dur(r.remaining_sec)}</td><td>${
+          UNREACH()[r.machine] ? unkChip(r.machine) :
           // 一時停止中 (Ctrl-Z) は再開の時刻が分からないので予定時刻は出さない
           r.paused ? `<span class="wrn" title="プロセスが一時停止しています (ps の状態 T)。再開すれば残り時間で終わります">⏸ 一時停止中</span>`
                    : when(r.eta)}</td>
@@ -313,7 +344,8 @@ function renderTrain() {
               + ` title="計画表のこの run の行へ移動">${cond}</span>`
             : cond)(`${r.agents}ag ${esc(r.map)} ${esc(r.algo)} ${esc(r.setting)}`)}</td>
         <td class="mut">${esc(r.seed)}${r.in_plan ? "" : ' <span class="wrn">計画外</span>'}${
-          r.stale_data ? ` <span class="wrn" title="このホストからの情報が古い">情報 ${dur(r.data_age_sec)} 前</span>` : ""}</td>
+          UNREACH()[r.machine] ? " " + unkChip(r.machine)
+          : (r.stale_data ? ` <span class="wrn" title="このホストからの情報が古い">情報 ${dur(r.data_age_sec)} 前</span>` : "")}</td>
         <td class="mut">${esc(r.duration)}</td>
         <td>${noteCell(r)}</td></tr>`).join("")
       : `<tr><td class="mut" colspan="11">なし</td></tr>`);
@@ -343,7 +375,7 @@ function renderTrain() {
     html += `<div class="mut">計画外の run: ${nOut} 件 `
           + `<span class="mut">(表には出しません。running / machines には出ます)</span></div>`;
 
-  let head = null, planHead = null, diffN = 0;
+  let head = null, planHead = null, groupHead = null, diffN = 0;
   const WARN = [];     // 上の「パラメータの警告」一覧に出すもの (表の描画と同じ判定で集める)
   const multi = new Set(plan.map(c => c.plan)).size > 1;
   plan.forEach(c => {
@@ -351,7 +383,14 @@ function renderTrain() {
     if (multi && c.plan !== planHead) {
       if (head !== null) { html += `</table></div>`; head = null; }
       planHead = c.plan;
+      groupHead = null;
       html += `<h2 class="planhead">${esc(c.plan)}</h2>`;
+    }
+    // 計画ファイルの "# ..." (LaRe モデル学習 / 方策学習 など) の区切り
+    if (c.group && c.group !== groupHead) {
+      if (head !== null) { html += `</table></div>`; head = null; }
+      groupHead = c.group;
+      html += `<div class="grouphead">${esc(c.group)}</div>`;
     }
     if (c.label !== head) {
       if (head !== null) html += `</table></div>`;
@@ -360,8 +399,10 @@ function renderTrain() {
       html += `<h3><span class="g-map">${esc(c.map || "")}</span>`
             + `<span class="g-n">${c.agents} agent</span>`
             + `<span class="g-t">${c.t_max_m}M</span></h3>`
-            + `<div class="wrap"><table class="cond">${condCols()}
-        <tr><th>seed</th><th>machine</th><th>setting</th><th>algorithm</th>
+            + `<div class="wrap"><table class="cond">${condCols(plan.filter(x =>
+                x.plan === c.plan && x.label === c.label && x.group === c.group))}
+        <tr>${c.collect === "lare"
+              ? `<th colspan="2">LaRe モデル</th>` : `<th>seed</th><th>machine</th>`}<th>setting</th><th>algorithm</th>
             <th>task arrival</th><th>task assign</th><th>reassign</th><th>状態</th></tr>`;
     }
     const NC = 8;                // 表の列の数 (隠し行の colspan に使う)
@@ -372,7 +413,10 @@ function renderTrain() {
                                      && usable(s.run)).length;
     // 5 seed そろっていれば、失敗した run は出さない (メモにも書かない運用に合わせる)。
     // 何件隠したかは条件行に出すので、黙って消えるわけではない
-    const filled = done >= want;
+    // LaRe モデル学習の条件は 1 本で完了するので、完了していても設定の確認を出す
+    // (方策の表は 5 seed 揃ったら余分な run を使わないので確認を引っ込める)
+    const lare = c.collect === "lare";
+    const filled = lare ? false : done >= want;
     let slots = c.slots, hidden = 0;
     if (filled) {
       const before = slots.length;
@@ -427,8 +471,11 @@ function renderTrain() {
     if (hasDiff) WARN.push({ kind: "split", c, n: dn });
     if (G.length) WARN.push({ kind: "global", c, n: gn, G });
 
-    html += `<tr class="condrow"><td></td><td></td>
-      <td title="${esc(c.setting)}">${esc(c.setting)}</td><td>${esc(ALGO(c.algo))}</td>
+    // 「LaRe モデル学習」の条件は seed を並べず、モデルファイルがあるかだけ出す。
+    // 設定の確認 (違いを見る / 他と違う) は学習 run の設定で方策の表と同じように出す
+    if (lare) html += lareRow(c, diffBtn + gBtn);
+    else html += `<tr class="condrow"><td></td><td></td>
+      <td title="${esc(c.setting)}">${esc(c.setting)}${c.mark ? " ✅" : ""}</td><td>${esc(ALGO(c.algo))}</td>
       <td>${esc(c.task_arrival)}</td><td>${esc(c.task_assign || "TP")}</td>
       <td>${ra}</td>
       <td class="st">${
@@ -471,6 +518,7 @@ function renderTrain() {
         + `</div></td></tr>`;
     }
 
+    if (lare) return;            // seed の行は出さない
     slots.forEach(sl => {
       const r = sl.run;
       let st;
@@ -508,6 +556,9 @@ function renderTrain() {
         }
         if (r.state === "done")
           st = `<span class="c-ok">✔ done</span> <span class="mut">${M(r.t_max)}M</span>${fin}${got}`;
+        else if (r.state === "running" && UNREACH()[r.machine])
+          // 繋がらない間は進み具合も終了予定も分からない。最後に見えた値だけ添える
+          st = unkChip(r.machine, ` <span class="mut">最後に見えた時点で ${pct}% (${steps})</span>`);
         else if (r.state === "running")
           st = `<span class="pb"><i style="width:${pct}%"></i></span> ${pct}%`
              + ` <span class="steps">${steps}</span>`
@@ -558,6 +609,14 @@ async function loadEval() {
     return;
   }
   const C = EVAL.conditions;
+  // 計画の選択肢: seed のモデルが属する計画 + どの計画にも無いもの
+  const P = new Set();
+  let noPlan = false;
+  C.forEach(d => (d.seeds || []).forEach(s => {
+    s.plans.forEach(p => P.add(p));
+    if (!s.plans.length) noPlan = true;
+  }));
+  fillSelect($("e-plan"), [...[...P].sort(), ...(noPlan ? [NOPLAN] : [])]);
   fillSelect($("e-map"), uniq(C, "map"));
   fillSelect($("e-n"), uniq(C, "n"));
   fillSelect($("e-env"), uniq(C, "env"));
@@ -579,7 +638,7 @@ async function loadEval() {
   if (pref >= 0) $("e-metric").selectedIndex = pref;
   renderEval();
 }
-["e-map", "e-n", "e-env", "e-planner", "e-tag", "e-alloc", "e-trained", "e-exre", "e-arrival",
+["e-plan", "e-map", "e-n", "e-env", "e-planner", "e-tag", "e-alloc", "e-trained", "e-exre", "e-arrival",
  "e-metric", "e-log"].forEach(id => $(id).onchange = renderEval);
 
 // 評価の条件を作っている要素。[キー, 見出し, 表示する値]
@@ -603,9 +662,79 @@ const CMP = new Set();            // 比較に選んでいる要素のキー
 // "5" と "10"、"bern0.05" と "bern0.1" を数の大きさの順に並べる
 const natCmp = (a, b) => String(a).localeCompare(String(b), undefined, { numeric: true });
 
+// 計画で絞ったときは、その計画の seed だけで平均・標準偏差を取り直す。
+// summary.csv の値は全 seed をまとめたもので、計画ごとに seed の数が違う
+// (AAMAS は 5 seed、reassign は seed0 だけ、arrival_range は範囲を変えた run) ため
+const NOPLAN = "(計画外)";
+// LaRe モデル学習の条件 1 行。src/lare/path/models/ にあれば完了、checkpoints/ だけなら
+// コピー待ち、どちらにも無ければ学習中の run の進み具合か「未作成」
+function lareRow(c, btns) {
+  const F = c.lare_files || [];
+  const inModels = F.find(f => f.where === "models");
+  const inCkpt = F.find(f => f.where === "checkpoints");
+  const inFetched = F.find(f => f.where === "fetched");     // 他のマシンから回収したもの
+  const run = (c.slots || []).map(s => s.run).find(r => r && r.state === "running");
+  const doneRun = (c.slots || []).map(s => s.run).find(r => r && r.state === "done");
+  // 学習した PC。記録のある run (完了 > 実行中) を優先し、無ければ計画表の
+  // LaRe model 列の括弧書き (例: "✔ models (GPU2)") を使う
+  const prod = (c.slots || []).map(s => s.run).find(r => r && r.state === "done") || run;
+  const noteM = /[(（]([^)）]+)[)）]/.exec(c.lare_note || "");
+  const pc = prod ? prod.machine : (noteM ? noteM[1] : "");
+  const pcTag = pc ? ` <span class="mut sm" title="学習した PC">${esc(pc)}</span>` : "";
+  let file = `<span class="mut">-</span>`, st;
+  if (inModels) {
+    file = `<span class="c-ok" title="src/lare/path/models/${esc(inModels.name)}">✔ models/</span>`;
+    st = `<span class="c-ok">✔ あり</span> <span class="mut sm">${esc(inModels.name)}</span>`;
+  } else if (inCkpt) {
+    file = `<span class="wrn" title="src/lare/path/checkpoints/${esc(inCkpt.name)}">checkpoints/</span>`;
+    st = `<span class="wrn" title="使う前に models/ へコピーしてください">checkpoints/ のみ</span>`
+       + ` <span class="mut sm">${esc(inCkpt.name)}</span>`;
+  } else if (inFetched) {
+    const p = `src/lare/path/fetched/${inFetched.machine || ""}/${inFetched.name}`;
+    file = `<span class="wrn" title="${esc(p)}">fetched/</span>`;
+    st = `<span class="wrn" title="使う前に models/ へコピーしてください: ${esc(p)}">`
+       + `取得済み (${esc(inFetched.machine || "?")})</span>`
+       + ` <span class="mut sm">${esc(inFetched.name)}</span>`;
+  } else if (doneRun) {
+    // 学習は終わったが、モデルがまだこの Mac に届いていない (次の定期回収で取ってくる)
+    st = `<span class="wrn" title="次の定期回収 (launchd) で src/lare/path/fetched/ に取ってきます。`
+       + `共有フォルダのマシンは、相手の collect_runs.py が新しい版 (git pull 済み) である必要があります">`
+       + `学習完了・未回収 (${esc(doneRun.machine || "?")})</span>`;
+  } else if (run) {
+    st = `<span class="pb"><i style="width:${((run.progress || 0) * 100).toFixed(0)}%"></i></span> `
+       + `${((run.progress || 0) * 100).toFixed(0)}% <span class="mut sm">${esc(run.machine || "")}</span>`;
+  } else {
+    st = `<span class="mut">未作成</span>`;
+  }
+  return `<tr class="condrow"><td colspan="2">${file}${pcTag}</td>
+    <td title="${esc(c.setting)}">${esc(c.setting)}${c.mark ? " ✅" : ""}</td><td>${esc(String(c.algo || "").toUpperCase())}</td>
+    <td>${esc(c.task_arrival)}</td><td>${esc(c.task_assign || "TP")}</td>
+    <td>${c.reassign == null ? "-" : (c.reassign ? "T" : "F")}</td>
+    <td class="st">${st}${btns || ""}</td></tr>`;
+}
+
+function planView(d, plan) {
+  const ss = (d.seeds || []).filter(s =>
+    plan === NOPLAN ? !s.plans.length : s.plans.includes(plan));
+  if (!ss.length) return null;
+  const metrics = {};
+  (EVAL.metrics || []).forEach(m => {
+    const v = ss.map(s => s.vals[m]).filter(x => x != null);
+    if (!v.length) return;
+    const n = v.length, mean = v.reduce((a, b) => a + b, 0) / n;
+    // 標本標準偏差 (aggregate.py と同じ ddof=1)
+    const std = n >= 2 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1)) : null;
+    metrics[m] = { n, mean, std, sem: std == null ? null : std / Math.sqrt(n), per_seed: v };
+  });
+  return Object.assign({}, d, { metrics });
+}
+
 function evalRows() {
   const g = id => $(id).value;
-  return (EVAL.conditions || []).filter(d =>
+  const plan = g("e-plan");
+  const base = plan ? (EVAL.conditions || []).map(d => planView(d, plan)).filter(Boolean)
+                    : (EVAL.conditions || []);
+  return base.filter(d =>
     (!g("e-map") || d.map === g("e-map")) &&
     (!g("e-n") || String(d.n) === g("e-n")) &&
     (!g("e-env") || d.env === g("e-env")) &&
@@ -972,8 +1101,11 @@ function renderLoad() {
       // 自分の学習 1 本あたりの VRAM (取れるマシンだけ)。空き VRAM と比べて足せる本数の目安にする
       const per = h.gpu_mem_mine_mb != null && h.train_procs
         ? ` <span class="mut sm" title="このリポジトリの学習 1 本あたりの VRAM">(1 本 ${gb(h.gpu_mem_mine_mb / h.train_procs)} GB)</span>` : "";
-      return `<tr><td>${esc(k)}</td>
-        <td class="${age != null && age > 3600 ? "err" : "mut"}">${age == null ? "-" : dur(age) + " 前"}</td>
+      // 繋がらないホストは値を薄く出し、「確認できません」と添える (赤くはしない)
+      const unr = !!UNREACH()[k];
+      return `<tr${unr ? ' class="unkrow"' : ""}><td>${esc(k)}</td>
+        <td>${unr ? unkChip(k, ` <span class="mut sm">最終 ${age == null ? "-" : dur(age) + " 前"}</span>`)
+                  : `<span class="${age != null && age > 3600 ? "err" : "mut"}">${age == null ? "-" : dur(age) + " 前"}</span>`}</td>
         <td>${meter(h.cpu_pct, h.load1 != null ? `load ${h.load1}` : "")}</td>
         <td>${meter(memPct, h.mem_total_mb ? `${gb(h.mem_used_mb)} / ${gb(h.mem_total_mb)} GB` : "")}</td>
         <td>${g ? meter(g.util, `${Math.round(g.temp)}°C`) : `<span class="mut">GPU なし</span>`}</td>

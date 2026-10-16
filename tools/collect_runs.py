@@ -235,6 +235,10 @@ def param_fields(cfg_full, env_full):
     if env.get("randomize_task_arrival"):
         for k in ("task_arrival", "task_density"):
             env.pop(k, None)
+    # task_arrival="fixed" は毎ステップ 1 件で、task_density を使わない
+    # (EE_map.create_tasklist の mode == 'fixed' の分岐)
+    elif env.get("task_arrival", "fixed") == "fixed":
+        env.pop("task_density", None)
     # 環境報酬 (goal / collision / wait / move)。既定値から変えた run だけキーが残り、
     # 同じ条件の他の seed や他の条件と違えば params✗ / 他と違う の警告になる
     if "reward_list" in env:
@@ -482,6 +486,110 @@ def find_model(index, repo, algo, seed, env_key):
     }
 
 
+# ---- LaRe-Path のモデル (.pth) ------------------------------------------------
+# LaRe を学習した run (scratch / 追加学習) は、方策とは別に
+# src/lare/path/checkpoints/ へ LaRe のモデルを保存する (drp_env.py の autosave)。
+# ファイル名は run の設定から決まるので、名前の規則と更新時刻で run と結ぶ:
+#   scratch : {ALGO}_PATH_[F{v}_]{Safe_}{map}_{N}agents_{S}M_{checkpoint|final}.pth
+#   追加学習: FT_{元のモデル名}_{Safe_}{map}_{N}agents_{S}M_{checkpoint|final}.pth
+# 同じ条件を同じマシンで回し直すと同じ名前で上書きされるので、
+# 「run の開始から終了 (+10 分) の間に書かれたもの」だけをその run のものとみなす
+LARE_PATH_CKPT_DIR = os.path.join("src", "lare", "path", "checkpoints")
+LARE_STEP_RE = re.compile(r"_([\d.]+)M_(checkpoint|final)\.pth$")
+LARE_VER_RE = re.compile(r"_PATH_F(\d+)_")
+_LARE_LS = {}
+
+
+def _lare_listdir(d):
+    """checkpoints/ の一覧 (走査 1 回の中では使い回す)."""
+    if d not in _LARE_LS:
+        try:
+            _LARE_LS[d] = sorted(os.listdir(d))
+        except OSError:
+            _LARE_LS[d] = []
+    return _LARE_LS[d]
+
+
+def _lare_source_base(name):
+    """drp_env._lare_get_source_base_name と同じ: 拡張子・接尾辞・先頭の FT_ を外す."""
+    n = os.path.basename(str(name or ""))
+    if n.endswith(".pth"):
+        n = n[:-4]
+    n = n.replace("_final", "").replace("_checkpoint", "")
+    while n.startswith("FT_"):
+        n = n[3:]
+    return n
+
+
+def find_lare_model(repo, env, start_time, end_time):
+    """run が保存した LaRe-Path のモデルのうち最後のもの. 無ければ None.
+
+    返り値: {"name", "rel" (repo からの相対), "size", "mtime", "step_m"}
+    """
+    env = env or {}
+    if not repo or not env.get("use_lare_path"):
+        return None
+    if env.get("use_pretrained_lare_path") and env.get("pretrained_lare_path_model_name"):
+        return None                       # 固定して使うだけ。保存しない
+    if env.get("lare_path_autosave") is False:
+        return None
+    m = ENV_KEY_RE.search(str(env.get("key") or ""))
+    if not m:
+        return None
+    safe_seg = "Safe_" if m.group(1) else ""
+    stage = "%s%s_%sagents_" % (safe_seg, m.group(3), m.group(2))
+    fin = env.get("use_finetuning_lare_path") and env.get("finetuning_lare_path_model_name")
+    try:
+        version = int(env.get("lare_path_factor_version") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    explicit = env.get("lare_path_autosave_path")
+    if explicit:
+        d = os.path.dirname(os.path.join(repo, os.path.expanduser(str(explicit))))
+        names = [os.path.basename(str(explicit))]
+    else:
+        d = os.path.join(repo, LARE_PATH_CKPT_DIR)
+        names = _lare_listdir(d)
+    t0 = parse_dt(start_time)
+    t1 = parse_dt(end_time)
+    lo = t0.timestamp() - 60 if t0 else None
+    hi = t1.timestamp() + 600 if t1 else None
+    best = None
+    for n in names:
+        sm = LARE_STEP_RE.search(n)
+        if not sm:
+            continue
+        head = n[:sm.start() + 1]                     # "..._{N}agents_" まで
+        if not head.endswith(stage):
+            continue
+        if fin:
+            if not n.startswith("FT_%s_%s" % (_lare_source_base(fin), stage)):
+                continue
+        else:
+            if n.startswith("FT_") or "_PATH_" not in n:
+                continue
+            vm = LARE_VER_RE.search(n)
+            if (int(vm.group(1)) if vm else 1) != version:
+                continue
+        p = os.path.join(d, n)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if st.st_size == 0:
+            continue
+        if (lo is not None and st.st_mtime < lo) or (hi is not None and st.st_mtime > hi):
+            continue
+        key = (float(sm.group(1)), sm.group(2) == "final")
+        if best is None or key > best[0]:
+            best = (key, n, st)
+    if best is None:
+        return None
+    (step_m, _final), n, st = best
+    return {"name": n, "rel": os.path.relpath(os.path.join(d, n), repo),
+            "size": st.st_size, "mtime": st.st_mtime, "step_m": step_m}
+
+
 def scan_run_dir(run_dir, machine, root_tag, tail_bytes, repo=None, model_index=None):
     """sacred の run ディレクトリ 1 つを読んでレコード dict を返す."""
     cfg = _read_json(os.path.join(run_dir, "config.json"))
@@ -554,6 +662,12 @@ def scan_run_dir(run_dir, machine, root_tag, tail_bytes, repo=None, model_index=
     }
     # 学習プロセスの状態。"stopped" = Ctrl-Z 等で一時停止中 / "running" / None = 不明
     # train.py の予約から起動されていれば、その何本目か (batch_pos / batch_total) も付ける
+    # LaRe を学習した run は、LaRe のモデル (.pth) も run に結び付けておく
+    try:
+        rec["lare"] = find_lare_model(repo, env_full, run.get("start_time"),
+                                      run.get("stop_time") or run.get("heartbeat"))
+    except Exception:                      # 走査そのものは止めない
+        rec["lare"] = None
     proc = (find_training_proc(cfg_full, env_full, run.get("start_time"))
             if run.get("status") == "RUNNING" else None)
     rec["proc_state"] = (None if proc is None else
@@ -1347,6 +1461,17 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
         d["setting"] = env_label
         d["lare_mode"] = ("scratch" if env.get("use_lare_path_training")
                           else "scratch(frozen)")
+    # LaRe-Path の評価関数の版 (env_args.lare_path_factor_version)。版 1 (今まで) は
+    # 表記を変えない。2 以降は setting に " F2" のように付け、LaRe なしの run や
+    # 版 1 の run と同じ条件に数えられないようにする (design/lare_factor_versions.md)
+    fver = int(env.get("lare_path_factor_version") or 1) if env.get("use_lare_path") else 1
+    d["lare_factor_version"] = fver
+    if fver != 1:
+        d["setting"] = "%s F%d" % (d["setting"], fver)
+    elif d["lare_mode"] == "scratch":
+        # 版 1 の scratch (LaRe を run の中で一から学習) も " F1" を付ける。
+        # 付けないと LaRe なしの run と同じ "safe" になり、計画表で区別できない
+        d["setting"] = "%s F1" % d["setting"]
 
     # task arrival 列
     if env.get("randomize_task_arrival"):
@@ -1447,6 +1572,23 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
             if norm_chain(d.get("setting")) != norm_chain(canon):
                 d["method_tag"] = "%s_%s" % (d["method_tag"] or "dbct",
                                              _slug(d.get("setting"), "alt"))
+    # LaRe-Path の評価関数の版 2 以降は、評価用モデルの名前のタグにも版を付ける
+    # (例: safe -> safe_f2)。付けないと LaRe なし / 版 1 のモデルと同じ名前になる
+    # 版 1 の scratch も _f1 を付ける (LaRe なしの評価用モデルと同じ名前にしないため)
+    if d.get("lare_factor_version", 1) != 1 or d.get("lare_mode") == "scratch":
+        d["method_tag"] = "%s_f%d" % (d["method_tag"] or "safe", d.get("lare_factor_version", 1))
+    # 学習時の到着率の範囲が既定 U(0.01, 0.10) と違う run は、タグに範囲を足す
+    # (例: safe -> safe_p0.01-0.15)。足さないと評価用のファイル名が既定の run と
+    # 同じ stem になり、範囲の違いが seed の番号でしか区別できない。評価の条件名にも
+    # タグが入るので、集計で別の範囲の結果が同じ条件の seed として平均されなくなる
+    # (tools/plans/plan_arrival_range.md)
+    if env.get("randomize_task_arrival"):
+        lo = env.get("rand_p_min")
+        hi = env.get("rand_p_max")
+        lo = 0.01 if lo is None else float(lo)
+        hi = 0.10 if hi is None else float(hi)
+        if (lo, hi) != (0.01, 0.10):
+            d["method_tag"] = "%s_p%g-%g" % (d["method_tag"] or "safe", lo, hi)
 
     # 想定 t_max との照合. モデルの選択には使わない (使うのは run の t_max) が、
     # 「30M 回すつもりだったのに 10M で止めた run」を取り違えないための確認用
@@ -1458,8 +1600,12 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
         # t_max は 20050000 のように +50000 されている運用なので M 単位で丸めて比べる
         d["t_max_ok"] = round(t_max / 1e6) == round(exp / 1e6)
 
-    d["param_hash"] = rec.get("param_hash")
+    # ハッシュは手元の param_fields で計算し直す。drop のホストは自分の (古いかもしれない)
+    # collect_runs.py で計算して書き出すので、照合の規則を変えたときに食い違う
+    d["param_hash"] = (param_hash(rec.get("cfg"), rec.get("env"))
+                       if rec.get("cfg") is not None else rec.get("param_hash"))
     d["model"] = rec.get("model")
+    d["lare"] = rec.get("lare")
     d["repo"] = rec.get("repo")
     d["duration"] = fmt_dur((stop or beat or now_utc()) - start) if start else ""
     d["last_seen"] = beat or stop or start
@@ -1643,15 +1789,28 @@ def collect_drop(host, drop_root, stale_hours=24):
     except OSError:
         pass
 
-    recs = []
-    with open(path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    recs.append(json.loads(line))
-                except ValueError:
-                    pass
+    # iCloud が同期している最中のファイルを読むと Errno 11 (Resource deadlock avoided)
+    # で落ちる。以前はこれで収集全体が止まっていた (launchd のログに 334 回)。
+    # 少し待って読み直し、それでもだめならこのホストだけ諦めて次の回に回す
+    recs = None
+    for attempt in range(3):
+        try:
+            got = []
+            with open(path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("{"):
+                        try:
+                            got.append(json.loads(line))
+                        except ValueError:
+                            pass
+            recs = got
+            break
+        except OSError as e:
+            err = e
+            time.sleep(2 * (attempt + 1))
+    if recs is None:
+        return [], "cannot read %s (iCloud busy?): %s" % (path, err)
     mtime = os.path.getmtime(path)
     # 書き出された時刻をそのまま観測時刻にする。相手が --export した瞬間の
     # スナップショットなので、それ以降の経過は「情報が届いていない」であって
@@ -1704,6 +1863,23 @@ def export_drop(records, rows, drop_dir, what="path", with_optimizer=False,
         copied += 1
         todo.append((rec, out_dir, files))
 
+    # LaRe-Path のモデル (.pth)。1 本 25KB 程度なので容量の上限には数えない。
+    # ファイル名に条件が全部入っているので、共有フォルダでは lare/ の下に平らに置く。
+    # export_path は runs.jsonl に載せるので、進捗ファイルより先に決める
+    lare_todo = []
+    for rec in records:
+        lr = rec.get("lare")
+        if not lr or rec.get("uid") not in by_uid:
+            continue
+        lr["export_path"] = os.path.join("lare", lr["name"])
+        dst = os.path.join(drop_dir, lr["export_path"])
+        try:
+            if os.path.getsize(dst) == lr.get("size"):
+                continue                      # 同じものが置いてある
+        except OSError:
+            pass
+        lare_todo.append((os.path.join(rec.get("repo") or ".", lr["rel"]), dst))
+
     # --- 進捗ファイルを **先に** 書く ---------------------------------------
     # 440KB の runs.jsonl を 90MB のモデル転送の後ろに置くと、iCloud の
     # アップロードが詰まったときに進捗だけ先に届けられない。実測で
@@ -1739,9 +1915,25 @@ def export_drop(records, rows, drop_dir, what="path", with_optimizer=False,
                 sys.stderr.write("[export] skipped %s: %s\n"
                                  % (os.path.basename(out_dir), e))
 
-    sys.stderr.write("[export] %d run(s), %d model dir(s) newly copied (%.1f MB) -> %s%s\n"
+    lare_moved = 0
+    if not dry_run:
+        for src, dst in lare_todo:
+            try:
+                try:
+                    os.makedirs(os.path.dirname(dst))
+                except OSError:
+                    pass
+                shutil.copy2(src, dst)
+                lare_moved += 1
+            except (OSError, IOError) as e:
+                sys.stderr.write("[export] skipped LaRe %s: %s\n"
+                                 % (os.path.basename(dst), e))
+
+    sys.stderr.write("[export] %d run(s), %d model dir(s) newly copied (%.1f MB), "
+                     "%d LaRe model(s) -> %s%s\n"
                      % (len(records), moved if not dry_run else copied,
-                        total, drop_dir, " (dry run)" if dry_run else ""))
+                        total, lare_moved if not dry_run else len(lare_todo),
+                        drop_dir, " (dry run)" if dry_run else ""))
     return copied
 
 
@@ -3534,6 +3726,108 @@ def fetch_models(hosts, rows, dest, what="path", with_optimizer=False,
     return present + planned, fetched
 
 
+# 他のマシンで学習した LaRe-Path のモデルの置き場 (gitignore)。
+# 使うときは src/lare/path/models/ へコピーする (pretrained / finetuning は models/ から読む)。
+# checkpoints/ に混ぜないのは、この Mac で同じ条件を回したときの autosave と
+# 同じ名前になって上書きし合うため
+LARE_FETCH_DIR = os.path.join("src", "lare", "path", "fetched")
+
+
+def fetch_lare_models(hosts, rows, dest_repo, timeout=300, dry_run=False, drop_root=None):
+    """完了した run の LaRe-Path のモデルを {dest_repo}/src/lare/path/fetched/{マシン}/ に集める.
+
+    共有フォルダのホスト (黒) は lare/ に書き出されたものを、ssh のホスト (GPU) は
+    tar で取る。この Mac (local) で同じリポジトリのものは手元にあるので取らない。
+    """
+    import shutil
+    import tempfile
+    dest_repo = os.path.abspath(os.path.expanduser(dest_repo))
+    host_by_label = dict((h["label"], h) for h in hosts)
+    todo = {}
+    for d in rows:
+        lr = d.get("lare")
+        if d.get("state") != "done" or not lr:
+            continue
+        host = host_by_label.get(d.get("machine"))
+        if host is None:
+            continue
+        local = not host.get("drop") and host.get("ssh") in (None, "", "local")
+        if local and os.path.abspath(os.path.expanduser(d.get("repo") or "")) == dest_repo:
+            continue                              # この Mac の checkpoints/ にある
+        dst = os.path.join(dest_repo, LARE_FETCH_DIR, str(d.get("machine")), lr["name"])
+        try:
+            if os.path.getsize(dst) == lr.get("size"):
+                continue                          # 取得済み
+        except OSError:
+            pass
+        todo.setdefault(d.get("machine"), []).append((d, lr, dst))
+    n_want = sum(len(v) for v in todo.values())
+    if dry_run or not n_want:
+        for label, items in todo.items():
+            for _d, lr, _dst in items:
+                sys.stderr.write("  would fetch LaRe %s from %s\n" % (lr["name"], label))
+        if n_want:
+            sys.stderr.write("[lare] %d LaRe model(s) to fetch (dry run)\n" % n_want)
+        return 0
+
+    def _put(src, dst, copy):
+        try:
+            os.makedirs(os.path.dirname(dst))
+        except OSError:
+            pass
+        copy(src, dst)
+
+    got = 0
+    for label, items in todo.items():
+        host = host_by_label[label]
+        if host.get("drop"):
+            base = drop_dir_for(host, drop_root)
+            for _d, lr, dst in items:
+                # 相手のスクリプトが旧版だと export_path が無い (まだ書き出されていない)
+                src = os.path.join(base or "", lr.get("export_path") or "")
+                if not base or not lr.get("export_path") or not os.path.exists(src):
+                    continue
+                try:
+                    _put(src, dst, copy_cloud_file)
+                    got += 1
+                except (OSError, IOError) as e:
+                    sys.stderr.write("[lare] %s: %s: %s\n" % (label, lr["name"], e))
+            continue
+        if host.get("ssh") in (None, "", "local"):
+            for d, lr, dst in items:
+                src = os.path.join(os.path.expanduser(d.get("repo") or ""), lr["rel"])
+                try:
+                    _put(src, dst, shutil.copy2)
+                    got += 1
+                except (OSError, IOError) as e:
+                    sys.stderr.write("[lare] %s: %s: %s\n" % (label, lr["name"], e))
+            continue
+        # ssh: リポジトリごとに tar 1 本で受ける
+        by_repo = {}
+        for d, lr, dst in items:
+            repo = d.get("repo") or (host.get("repos") or ["."])[0]
+            by_repo.setdefault(repo, []).append((lr, dst))
+        for repo, its in by_repo.items():
+            tmp_dir = tempfile.mkdtemp(prefix=".lare_fetch_")
+            try:
+                err = _fetch_ssh(host, repo,
+                                 [(lr["rel"], lr["rel"], lr["size"]) for lr, _dst in its],
+                                 tmp_dir, timeout)
+                if err:
+                    sys.stderr.write("[lare] %s: %s\n" % (label, err))
+                    continue
+                for lr, dst in its:
+                    src = os.path.join(tmp_dir, lr["rel"])
+                    if os.path.exists(src):
+                        _put(src, dst, shutil.move)
+                        got += 1
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+    sys.stderr.write("[lare] fetched %d / %d LaRe model(s) into %s\n"
+                     % (got, n_want, os.path.join(dest_repo, LARE_FETCH_DIR)))
+    return got
+
+
 SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -3627,10 +3921,30 @@ def publish_models(planned, repo_dir, dry_run=False, hint=True, seed_idx=None,
     repo_dir = os.path.abspath(os.path.expanduser(repo_dir))
     published = skipped = 0
     lines = []
-    refused, tmax_warn, unplanned = 0, 0, 0
+    refused, tmax_warn, unplanned, lare_only = 0, 0, 0, 0
+    # 「LaRe モデル学習」の条件 (計画表の <!-- collect: lare -->) は LaRe の .pth が
+    # 目当てで、方策モデルは使わない。そこにしか一致しない run の方策は保管しない
+    lare_conds = [c for c in (conds or []) if c.get("collect") == "lare"]
+    conds = [c for c in (conds or []) if c.get("collect") != "lare"] if lare_conds else conds
 
     if seed_idx is None:
         seed_idx = assign_seed_indexes(planned, repo_dir, conds, planned_only)
+    # 保管済みのファイルが、どの run のものか (manifest の files -> uid)。
+    # 除外した run の番号は空き番号として回し直した run に引き継がれる (load_seed_index)。
+    # そのとき同じ名前のファイルが「除外した run のもの」として残っているので、
+    # 名前があるだけで「保管済み」とみなすと、回し直した run がいつまでも保管されない
+    owner = {}
+    excluded_uids = set(load_excluded())
+    mpath = os.path.join(repo_dir, "manifest.jsonl")
+    if os.path.exists(mpath):
+        with open(mpath) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                for rel in rec.get("files") or []:
+                    owner[rel] = rec.get("uid")
     if planned_only and not conds:
         # 計画が 1 条件も読めていないのに planned_only で走らせると、
         # 「計画に無い」と判定されて **1 つも保管されない**。
@@ -3653,6 +3967,9 @@ def publish_models(planned, repo_dir, dry_run=False, hint=True, seed_idx=None,
         # この run が属する計画。複数に一致したらそれぞれへ置く
         # (ファイルの中身は同じなので git は 1 blob しか持たない)
         names = plans_of(d, conds)
+        if not names and lare_conds and plans_of(d, lare_conds):
+            lare_only += 1
+            continue
         if planned_only and not names:
             unplanned += 1
             continue
@@ -3671,7 +3988,10 @@ def publish_models(planned, repo_dir, dry_run=False, hint=True, seed_idx=None,
                                  publish_names(d, sub, s_idx)))
         if not srcs:
             continue
-        if all(os.path.exists(os.path.join(repo_dir, r, n)) for _s, r, n in srcs):
+        # 置き換えるのは「同じ名前のファイルの持ち主が除外した run」のときだけ
+        if all(os.path.exists(os.path.join(repo_dir, r, n))
+               and owner.get("%s/%s" % (r, n)) not in excluded_uids
+               for _s, r, n in srcs):
             skipped += 1
             continue
         for _s, r, n in srcs:
@@ -3737,6 +4057,9 @@ def publish_models(planned, repo_dir, dry_run=False, hint=True, seed_idx=None,
                         " (dry run)" if dry_run else ""))
     if unplanned:
         sys.stderr.write("[publish] %d run(s) skipped: not in any plan\n" % unplanned)
+    if lare_only:
+        sys.stderr.write("[publish] %d run(s) skipped: LaRe-model runs (policy not kept)\n"
+                         % lare_only)
     if refused:
         sys.stderr.write("[publish] %d run(s) skipped: not finished cleanly\n" % refused)
     if tmax_warn:
@@ -4973,6 +5296,15 @@ def main(argv=None):
         if n_skip:
             sys.stderr.write("[fetch] skipping %d excluded run(s) listed in %s\n"
                              % (n_skip, EXCLUDE_PATH))
+        # LaRe-Path のモデルは方策と別の置き場 (このリポジトリの src/lare/path/fetched/)
+        try:
+            fetch_lare_models(hosts, targets,
+                              os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              timeout=args.fetch_timeout,
+                              dry_run=args.fetch_dry_run or not args.fetch_models,
+                              drop_root=drop_root)
+        except Exception as e:
+            sys.stderr.write("[lare] %s: %s\n" % (type(e).__name__, e))
         planned, _n = fetch_models(
             hosts, targets, args.fetch_models or "models_inbox",
             what=args.fetch_what, with_optimizer=args.fetch_optimizer,

@@ -20,6 +20,7 @@
 """
 
 import argparse
+import datetime
 import importlib.util
 import json
 import os
@@ -35,6 +36,14 @@ REPO = os.path.dirname(TOOLS)
 
 def _load(name):
     spec = importlib.util.spec_from_file_location(name, os.path.join(TOOLS, name + ".py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_repo(name):
+    """リポジトリ直下のスクリプト (aggregate.py など) を読み込む."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(REPO, name + ".py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -90,6 +99,8 @@ GLOBAL_SKIP_KEYS = frozenset((
     # 条件として振っている (plan_arrival_range.md)。MMPP の 2 相も範囲の両端にそろえる。
     # 条件の中で割れたときの params✗ は今までどおり出る
     "env.rand_p_min", "env.rand_p_max", "env.task_p_low", "env.task_p_high",
+    # LaRe の評価関数の版。計画表の setting 列 (F1 / F2 / F3) で条件として振っている
+    "env.lare_path_factor_version",
 ))
 GLOBAL_MIN_GROUP = 3    # 比べる相手がこれ未満なら多数派を決めない
 GLOBAL_MAJORITY = 0.5   # 多数派とみなす割合 (これ未満 = 意図的に振っているキー)
@@ -221,6 +232,7 @@ def _rank(seq, v):
 CR = _load("collect_runs")
 ER = _load("eval_report")
 PLAN = _load("plan")
+LM = _load("lare_models")        # LaRe モデル (.pth) の置き場所を調べる
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +261,9 @@ class State(object):
         self.collected_at = None
         self.errors = []
         self.batches = []          # train.py のバッチ。キャッシュには入れない
+        # SSH で繋がらなかったホスト {label: {"since": 最初に失敗した時刻, "error": 理由}}。
+        # 「異常」ではなく「確認できない」として画面に出す (その間の表示は最後に見えた時点のもの)
+        self.unreachable = {}
         # 共有フォルダの runs.jsonl の mtime。変わっていなければ読み飛ばす
         self.drop_mtime = {}
 
@@ -336,6 +351,9 @@ class State(object):
         # パラメータが多数派とずれている run。印を付ける判断に使う
         odd_uids = set(d["uid"] for d in CR.odd_param_runs(rows))
         pending = self.pending_by_cond(conds)
+        # 「LaRe モデル学習」の条件 (collect: lare) はモデルファイルの有無で判定する。
+        # 置き場所の一覧は 1 回だけ読む
+        lare_files = LM.scan() if any(c.get("collect") == "lare" for c in conds) else []
         # seed -> その seed を表に明記している条件の添字。別の計画 (例: AAMAS) の表に
         # seed が書いてある run は、その計画のもの。1 seed だけ借りている計画
         # (例: plan_reassign.md) の枠の下に「余分な完了 run *」として並べない
@@ -438,6 +456,13 @@ class State(object):
             out.append({
                 "param_diff": pdiff, "param_hashes": phashes,
                 "plan": c.get("plan"), "plan_file": c.get("plan_file"),
+                "group": c.get("group"), "group_order": c.get("group_order") or 0,
+                "collect": c.get("collect"), "mark": bool(c.get("mark")),
+                "lare_note": c.get("lare_note"),
+                "lare_files": ([{"where": f["where"], "name": f["name"],
+                                 "machine": f.get("machine")}
+                                for f in LM.find_for(c, lare_files)]
+                               if c.get("collect") == "lare" else None),
                 "label": PLAN.label(c), "map": c["map"], "agents": c["agents"],
                 "t_max_m": c["t_max_m"], "setting": c["setting"],
                 "algo": c["algo"], "task_arrival": c["task_arrival"],
@@ -450,6 +475,7 @@ class State(object):
         # 列内の並びは意味のある順にする (safe が基準、QMIX->MAPPO->MAT、TP->PPO、F->T)
         out.sort(key=lambda c: (
             str(c.get("plan") or ""),
+            c.get("group_order") or 0,          # "# ..." のグループは書いた順
             str(c["map"]), c["agents"], c["t_max_m"],
             0 if c["setting"] == "safe" else 1, str(c["setting"]),
             _rank(ALGO_ORDER, c["algo"]), str(c["algo"] or ""),
@@ -513,6 +539,7 @@ class State(object):
             data["plan_file"] = ", ".join(data["plan_files"])
             data["collected_at"] = self.collected_at
             data["busy"] = self.busy
+            data["unreachable"] = dict(self.unreachable)
             data["cache"] = os.path.expanduser(self.args.cache)
             notes = load_json(NOTE_PATH)
             for r in data["runs"]:
@@ -707,8 +734,54 @@ class State(object):
                     "conditions": [],
                     "error": "summary.csv がありません (aggregate.py --csv を実行してください)"}
         rows, metrics = ER.load_summary(path)
+        self._attach_seed_plans(rows, metrics)
         return {"source": path, "available": True, "metrics": metrics,
                 "conditions": sorted(rows, key=ER.sort_key)}
+
+    def _attach_seed_plans(self, rows, metrics):
+        """条件ごとに、seed ごとの値と「そのモデルがどの計画のものか」を付ける.
+
+        summary.csv は seed をまとめた平均しか持たない。計画 (tools/plans/*.md) ごとに
+        見るには、どの seed がどの計画の run かが要る。評価ログの [RESULT] 行の
+        model= (評価用のファイル名) を、保管リポジトリの manifest.jsonl の
+        eval_name -> plans で引く。画面側でその計画の seed だけで平均を取り直す。
+        (例: reassign 計画は seed0 だけ、arrival_range は範囲を変えた run の seed)
+        """
+        plans_of = {}
+        man = os.path.join(os.path.expanduser(self.args.models_repo), "manifest.jsonl")
+        try:
+            with open(man, "r") as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if r.get("eval_name"):
+                        plans_of.setdefault(r["eval_name"], set()).update(r.get("plans") or [])
+        except (IOError, OSError):
+            return
+        try:
+            AG = _load_repo("aggregate")
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):   # 集計のログは画面に要らない
+                runs = AG.load_runs(os.path.join(REPO, "logs"))
+        except Exception as e:                  # 読めなくても評価タブ自体は出す
+            sys.stderr.write("[eval] seed plans: %s: %s\n" % (type(e).__name__, e))
+            return
+        for d in rows:
+            seeds = []
+            for seed, rec in (runs.get(d["condition"]) or {}).items():
+                vals = {}
+                for m in metrics:
+                    try:
+                        vals[m] = float(rec[m])
+                    except (KeyError, ValueError):
+                        pass
+                seeds.append({"seed": seed, "model": rec.get("model"),
+                              "plans": sorted(plans_of.get(rec.get("model"), ())),
+                              "vals": vals})
+            d["seeds"] = seeds
 
     # --- 収集 (重い。バックグラウンドで回す) -----------------------------
     def collect(self):
@@ -765,8 +838,27 @@ class State(object):
             CR.write_cache(cache, merged)
 
             with self.lock:
-                self.batches = batches
-                self.errors = ["%s: %s" % (a, b) for a, b in errors]
+                # SSH のホストで run が 1 件も取れなかったものは「繋がらない」。
+                # 赤いエラーではなく「確認できません」として別に持つ
+                ssh_labels = set(h["label"] for h in hosts
+                                 if not h.get("drop")
+                                 and h.get("ssh") not in (None, "", "local"))
+                got = set(r.get("machine") for r in raw)
+                down = dict((a, b) for a, b in errors
+                            if a in ssh_labels and a not in got)
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                for label in ssh_labels:
+                    if label in down:
+                        prev = self.unreachable.get(label) or {}
+                        self.unreachable[label] = {"since": prev.get("since") or now_iso,
+                                                   "error": down[label]}
+                    else:
+                        self.unreachable.pop(label, None)
+                self.errors = ["%s: %s" % (a, b) for a, b in errors if a not in down]
+                # 繋がらなかったホストの予約 (train.py のバッチ) は前回の分を残す。
+                # 消すと計画表の「⏳ 実行待ち」が「未実行」に化け、空いていると誤読する
+                self.batches = batches + [b for b in (self.batches or [])
+                                          if b.get("machine") in down]
                 self.collected_at = time.time()
         except Exception as e:                      # 画面を落とさない
             with self.lock:

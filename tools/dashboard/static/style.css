@@ -189,3 +189,12 @@ tr:hover .exlbtn,.exlbtn:focus{visibility:visible}
 #t-load .pb i.c-ok{background:var(--ok)}
 #t-load .pb i.wrn{background:var(--warn)}
 #t-load .pb i.err{background:var(--bad)}
+
+/* 接続できず確認できない状態。異常 (赤) とは分け、灰色の破線で示す */
+.unk{display:inline-block;font-size:11px;padding:0 6px;border:1px dashed var(--mut);
+     border-radius:4px;color:var(--mut)}
+#t-load tr.unkrow td:not(:nth-child(2)){opacity:.45}
+#t-run tr.unkrow td{opacity:.6}
+#t-run tr.unkrow .unk{opacity:1}
+.grouphead{margin:18px 0 2px;padding:3px 8px;font-size:13px;font-weight:600;
+  border-left:4px solid var(--accent, #4a7bd0);background:var(--sub, rgba(127,127,127,.08))}
