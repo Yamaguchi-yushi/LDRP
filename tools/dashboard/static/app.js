@@ -60,12 +60,16 @@ function setTab(name) {
   tab = name;
   $("pane-train").hidden = name !== "train";
   $("pane-eval").hidden = name !== "eval";
+  $("pane-curve").hidden = name !== "curve";
   $("tab-train").classList.toggle("on", name === "train");
   $("tab-eval").classList.toggle("on", name === "eval");
+  $("tab-curve").classList.toggle("on", name === "curve");
   if (name === "eval" && !EVAL) loadEval();
+  if (name === "curve") loadCurves();
 }
 $("tab-train").onclick = () => setTab("train");
 $("tab-eval").onclick = () => setTab("eval");
+$("tab-curve").onclick = () => setTab("curve");
 
 /* ── 学習の進捗 ───────────────────────────────────────── */
 // 絞り込みの値の取り出し方。**計画の行 (cond) と run で同じ表記に揃える**。
@@ -1269,6 +1273,221 @@ async function poll() {
                  setTimeout(poll, 3000); return; }
   if (wasBusy || !TRAIN) await loadTrain(); else renderStamp();
 }
+/* ── 学習曲線 ─────────────────────────────────────────── */
+// 計画の章 (計画 x マップ x 台数 x t_max) ごとに 1 枚の図。線 1 本 = run 1 本
+// (「条件で平均」なら条件 1 本)。値は sacred の metrics.json を間引いたもの
+let CURVE = null;
+const CURVE_HIDDEN = new Set();          // 凡例で消した線 (章ラベル|系列キー)
+const CURVE_PALETTE = ["#0969da", "#cf222e", "#1a7f37", "#8250df", "#bc4c00", "#0f6b6b",
+                       "#9a6700", "#e85aad", "#57606a", "#2da44e", "#6639ba", "#fb8f44"];
+const METRIC_LABEL = {
+  test_task_completion_mean: "配送数 (test_task_completion_mean)",
+  test_goal_mean: "ゴール数 (test_goal_mean)",
+  test_collision_mean: "衝突数 (test_collision_mean)",
+  test_return_mean: "return (test_return_mean。LaRe ありは LaRe の報酬なので条件間で比べられない)",
+};
+const curVer = s => { const m = / F(\d+)$/.exec(normSetting(s.setting)); return m ? "F" + m[1] : "F1"; };
+const curRe = s => s.reassign == null ? "-" : (s.reassign ? "T" : "F");
+const curCond = s => `${normSetting(s.setting)} / ${String(s.algo || "").toUpperCase()} / ${s.task_assign} / re ${curRe(s)}`;
+
+async function loadCurves() {
+  $("c-body").innerHTML = `<div class="mut">読み込み中…</div>`;
+  CURVE = await api("/api/curves");
+  const plans = uniq(CURVE.chapters, "plan");
+  const pl = $("c-plan"), cur = pl.value;
+  pl.innerHTML = plans.map(p => `<option>${esc(p)}</option>`).join("");
+  // 既定は lare_factor (無ければ、曲線のある run がいちばん多い計画)
+  if (plans.includes(cur)) pl.value = cur;
+  else if (plans.includes("lare_factor")) pl.value = "lare_factor";
+  const ms = $("c-metric"), mcur = ms.value;
+  ms.innerHTML = CURVE.metrics.map(m => `<option value="${m}">${esc(METRIC_LABEL[m] || m)}</option>`).join("");
+  ms.value = CURVE.metrics.includes(mcur) ? mcur : "test_task_completion_mean";
+  fillCurveFilters();
+  renderCurves();
+}
+function fillCurveFilters() {
+  const S = CURVE.chapters.filter(ch => ch.plan === $("c-plan").value)
+    .flatMap(ch => ch.series.map(s => Object.assign({ map: ch.map, agents: ch.agents }, s)));
+  fillSelect($("c-map"), uniq(S, "map"));
+  fillSelect($("c-n"), uniq(S, "agents"));
+  fillSelect($("c-setting"), [...new Set(S.map(s => normSetting(s.setting)))].sort());
+  fillSelect($("c-ver"), [...new Set(S.map(curVer))].sort());
+  fillSelect($("c-algo"), uniq(S, "algo"));
+  fillSelect($("c-assign"), uniq(S, "task_assign"));
+  fillSelect($("c-reassign"), [...new Set(S.map(curRe))].sort());
+  fillSelect($("c-machine"), uniq(S, "machine"));
+}
+// 移動平均 (前後 w/2 点)。端は取れる点だけで平均する
+function smooth(ys, w) {
+  if (w <= 1) return ys;
+  const h = Math.floor(w / 2), out = [];
+  for (let i = 0; i < ys.length; i++) {
+    let s = 0, n = 0;
+    for (let j = Math.max(0, i - h); j <= Math.min(ys.length - 1, i + h); j++)
+      if (ys[j] != null) { s += ys[j]; n++; }
+    out.push(n ? s / n : null);
+  }
+  return out;
+}
+// x (t_env) の位置の値。前後 3 点の平均 (評価は 1 点ごとに揺れるので)。届いていなければ null
+function valueAt(xs, ys, x) {
+  if (!xs.length || xs[xs.length - 1] < x * 0.97) return null;
+  let i = 0, best = Infinity;
+  xs.forEach((v, k) => { const d = Math.abs(v - x); if (d < best) { best = d; i = k; } });
+  const sl = ys.slice(Math.max(0, i - 3), i + 4).filter(v => v != null);
+  return sl.length ? sl.reduce((a, b) => a + b, 0) / sl.length : null;
+}
+// 同じ条件の run を 1 本にする。共通の x の格子に線形補間して、全 run が届いている範囲だけ平均
+function meanSeries(list) {
+  const end = Math.min(...list.map(s => s.xs[s.xs.length - 1]));
+  const grid = [];
+  for (let i = 0; i <= 200; i++) grid.push(end * i / 200);
+  const interp = (xs, ys, x) => {
+    if (x <= xs[0]) return ys[0];
+    for (let k = 1; k < xs.length; k++)
+      if (xs[k] >= x) { const t = (x - xs[k - 1]) / (xs[k] - xs[k - 1] || 1);
+                        return ys[k - 1] + t * (ys[k] - ys[k - 1]); }
+    return ys[ys.length - 1];
+  };
+  return { xs: grid, ys: grid.map(x => list.reduce((a, s) => a + interp(s.xs, s.ys, x), 0) / list.length) };
+}
+
+function renderCurves() {
+  if (!CURVE) return;
+  const metric = $("c-metric").value, w = +$("c-smooth").value, avg = $("c-mean").checked;
+  const g = id => $(id).value;
+  const keep = s =>
+    (!g("c-setting") || normSetting(s.setting) === g("c-setting")) &&
+    (!g("c-ver") || curVer(s) === g("c-ver")) &&
+    (!g("c-algo") || s.algo === g("c-algo")) &&
+    (!g("c-assign") || s.task_assign === g("c-assign")) &&
+    (!g("c-reassign") || curRe(s) === g("c-reassign")) &&
+    (!g("c-machine") || s.machine === g("c-machine")) &&
+    (!g("c-state") || s.state === g("c-state"));
+  const chs = CURVE.chapters.filter(ch => ch.plan === g("c-plan")
+    && (!g("c-map") || ch.map === g("c-map")) && (!g("c-n") || String(ch.agents) === g("c-n"))
+    && ($("c-lare").checked || ch.collect !== "lare"));
+  let html = "", nRun = 0, nNo = 0, group = null;
+  chs.forEach((ch, ci) => {
+    let ss = ch.series.filter(keep);
+    if (!ss.length) return;
+    // 曲線のある run だけ図に出す。無いもの (取得前・旧版のマシン) は数だけ知らせる
+    const noCurve = ss.filter(s => !(s.m && s.m[metric]));
+    nNo += noCurve.length;
+    ss = ss.filter(s => s.m && s.m[metric]).map(s => Object.assign({}, s, {
+      xs: s.m[metric][0], ys: s.m[metric][1], key: curCond(s) + (avg ? "" : ` / ${s.machine} ${s.seed}`) }));
+    if (avg) {
+      const by = {};
+      ss.forEach(s => (by[curCond(s)] = by[curCond(s)] || []).push(s));
+      ss = Object.values(by).map(l => Object.assign({}, l[0], meanSeries(l),
+        { key: curCond(l[0]), n: l.length, state: l.every(s => s.state === "done") ? "done" : "running",
+          machine: [...new Set(l.map(s => s.machine))].join("/") }));
+    }
+    nRun += ss.length;
+    if (ch.group && ch.group !== group) { group = ch.group; html += `<div class="grouphead">${esc(group)}</div>`; }
+    html += curveChapter(ch, ss, noCurve, metric, w);
+  });
+  if (!html) html = `<div class="mut">この絞り込みで曲線のある run がありません`
+    + ` (曲線は収集のたびに取りに行きます。始めたばかりなら次の収集を待ってください)</div>`;
+  $("c-body").innerHTML = html;
+  $("c-counts").textContent = `${nRun} 本` + (nNo ? ` (曲線未取得 ${nNo} 本)` : "");
+}
+
+function curveChapter(ch, ss, noCurve, metric, w) {
+  const tmax = (ch.t_max_m || 1) * 1e6;
+  const colorBy = $("c-color").value, dashBy = $("c-dash").value;
+  const colorKey = s => colorBy === "setting" ? normSetting(s.setting)
+    : colorBy === "assign" ? s.task_assign : colorBy === "reassign" ? curRe(s)
+    : colorBy === "machine" ? s.machine : s.key;
+  const ckeys = [...new Set(ss.map(colorKey))].sort();
+  const color = s => CURVE_PALETTE[ckeys.indexOf(colorKey(s)) % CURVE_PALETTE.length];
+  const dash = s => (dashBy === "assign" && s.task_assign === "PPO")
+    || (dashBy === "reassign" && s.reassign) ? "6 4" : "";
+  const hid = s => CURVE_HIDDEN.has(ch.label + "|" + s.key);
+  ss.sort((a, b) => a.key.localeCompare(b.key));
+  ss.forEach(s => { s.sy = smooth(s.ys, w); });
+
+  const W = 820, H = 320, L = 52, R = 16, T = 12, B = 32;
+  const vis = ss.filter(s => !hid(s));
+  const vals = vis.flatMap(s => s.sy.filter(v => v != null));
+  let lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 1;
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
+  const sx = x => L + (x / tmax) * (W - L - R);
+  const sy = v => H - B - ((v - lo) / (hi - lo)) * (H - T - B);
+  let g = `<line x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}" stroke="var(--line)"/>`;
+  for (let i = 0; i <= 4; i++) {
+    const v = lo + i / 4 * (hi - lo), y = sy(v);
+    g += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--line)" stroke-dasharray="2 3"/>`
+       + `<text x="${L - 6}" y="${y + 4}" text-anchor="end" fill="var(--mut)" font-size="10">${num(v, 1)}</text>`;
+  }
+  for (let i = 0; i <= 5; i++) {
+    const x = tmax * i / 5;
+    g += `<text x="${sx(x)}" y="${H - B + 16}" text-anchor="middle" fill="var(--mut)" font-size="10">${num(x / 1e6, 1)}M</text>`;
+  }
+  vis.forEach(s => {
+    const pts = s.xs.map((x, i) => s.sy[i] == null ? null : `${sx(Math.min(x, tmax)).toFixed(1)},${sy(s.sy[i]).toFixed(1)}`)
+      .filter(Boolean).join(" ");
+    g += `<polyline fill="none" stroke="${color(s)}" stroke-width="1.6" stroke-dasharray="${dash(s)}"`
+       + ` points="${pts}"><title>${esc(s.key)}</title></polyline>`;
+    if (s.state === "running") {              // 学習中の先端に印
+      const i = s.xs.length - 1;
+      if (s.sy[i] != null)
+        g += `<circle cx="${sx(Math.min(s.xs[i], tmax))}" cy="${sy(s.sy[i])}" r="3" fill="${color(s)}"><title>${esc(s.key)} (学習中)</title></circle>`;
+    }
+  });
+
+  const legend = ss.map(s => {
+    const k = ch.label + "|" + s.key;
+    return `<span class="cleg${hid(s) ? " off" : ""}" data-ckey="${esc(k)}">`
+      + `<svg width="22" height="8"><line x1="0" y1="4" x2="22" y2="4" stroke="${color(s)}" stroke-width="2"`
+      + ` stroke-dasharray="${dash(s)}"/></svg>${esc(s.key)}${s.n > 1 ? ` (${s.n} run)` : ""}</span>`;
+  }).join("");
+
+  // 表: t_max の 10 / 25 / 50 / 75 / 100% の時点の値 (前後 3 点の平均。平滑化はかけない)
+  const fr = [0.1, 0.25, 0.5, 0.75, 1.0];
+  const better = metric === "test_collision_mean" ? -1 : 1;
+  const bestOf = fr.map((f, i) => {
+    const vs = vis.map(s => valueAt(s.xs, s.ys, f * tmax)).filter(v => v != null);
+    return vs.length ? (better > 0 ? Math.max(...vs) : Math.min(...vs)) : null;
+  });
+  const rows = ss.map(s => {
+    const last = s.ys.slice(-5).filter(v => v != null);
+    const lv = last.length ? last.reduce((a, b) => a + b, 0) / last.length : null;
+    return `<tr${hid(s) ? ` class="mut"` : ""}><td><i class="dot" style="background:${color(s)}"></i>${esc(s.key)}</td>`
+      + `<td>${s.state === "done" ? `<span class="c-ok">done</span>` : `${Math.round((s.progress || 0) * 100)}%`}</td>`
+      + fr.map((f, i) => { const v = valueAt(s.xs, s.ys, f * tmax);
+          return `<td class="num${v != null && v === bestOf[i] && vis.length > 1 ? " cbest" : ""}">${v == null ? `<span class="mut">-</span>` : num(v, 1)}</td>`; }).join("")
+      + `<td class="num">${lv == null ? "-" : num(lv, 1)} <span class="mut sm">@${num(s.xs[s.xs.length - 1] / 1e6, 1)}M</span></td></tr>`;
+  }).join("");
+  const head = `<tr><th>条件</th><th>状態</th>${fr.map(f => `<th class="num">${num(f * ch.t_max_m, 1)}M</th>`).join("")}<th class="num">最新 (最後の 5 点)</th></tr>`;
+
+  return `<h3><span class="g-map">${esc(ch.map || "")}</span><span class="g-n">${ch.agents} agent</span>`
+    + `<span class="g-t">${ch.t_max_m}M</span></h3>`
+    + `<div class="cchart"><svg viewBox="0 0 ${W} ${H}" width="100%">${g}</svg>`
+    + `<div class="legend">${legend}</div></div>`
+    + `<div class="wrap"><table class="ctbl">${head}${rows}</table></div>`
+    + (noCurve.length ? `<div class="mut sm">曲線をまだ取れていない run: ${noCurve.map(s =>
+        esc(curCond(s) + " / " + s.machine)).join(", ")}</div>` : "");
+}
+
+document.addEventListener("click", ev => {
+  const el = ev.target.closest && ev.target.closest("[data-ckey]");
+  if (!el) return;
+  const k = el.getAttribute("data-ckey");
+  if (CURVE_HIDDEN.has(k)) CURVE_HIDDEN.delete(k); else CURVE_HIDDEN.add(k);
+  renderCurves();
+});
+$("c-plan").addEventListener("change", () => { fillCurveFilters(); renderCurves(); });
+["c-metric", "c-map", "c-n", "c-setting", "c-ver", "c-algo", "c-assign", "c-reassign",
+ "c-machine", "c-state", "c-color", "c-dash", "c-smooth", "c-mean", "c-lare"]
+  .forEach(id => $(id).addEventListener("change", renderCurves));
+
 setInterval(() => { if ($("auto").checked) loadTrain(); }, 60000);
+// 学習曲線は収集 (15 分おき) でしか変わらないので、開いているときだけ 5 分おきに取り直す
+setInterval(() => { if ($("auto").checked && tab === "curve") loadCurves(); }, 300000);
 
 loadTrain();
+// URL の末尾が #curve / #eval なら、そのタブで開く (ブックマーク用)
+if (location.hash === "#curve") setTab("curve");
+else if (location.hash === "#eval") setTab("eval");

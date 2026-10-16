@@ -198,3 +198,9 @@ tr:hover .exlbtn,.exlbtn:focus{visibility:visible}
 #t-run tr.unkrow .unk{opacity:1}
 .grouphead{margin:18px 0 2px;padding:3px 8px;font-size:13px;font-weight:600;
   border-left:4px solid var(--accent, #4a7bd0);background:var(--sub, rgba(127,127,127,.08))}
+/* 学習曲線タブ */
+.cchart{max-width:900px}
+.cleg{display:inline-flex;align-items:center;gap:4px;margin:0 12px 4px 0;cursor:pointer;font-size:12px}
+.cleg.off{opacity:.35;text-decoration:line-through}
+table.ctbl td,table.ctbl th{padding:2px 8px}
+table.ctbl td.cbest{font-weight:700}

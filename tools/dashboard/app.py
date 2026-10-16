@@ -76,6 +76,8 @@ NOTE_PATH = os.path.join(TOOLS, ".run_notes.json")
 # マシンごとの稼働率 (CPU / メモリ / GPU) の最新値。ダッシュボードを再起動しても
 # 直前の値を出せるようにファイルにも置く (中身は collect_runs.host_stats の戻り値)
 HOST_STATS_PATH = os.path.join(TOOLS, ".host_stats.json")
+# 学習曲線のキャッシュ (collect_runs.fetch_metric_curves が書く)。gitignore
+CURVE_CACHE_PATH = os.path.join(TOOLS, ".curve_cache.json")
 NOTE_MAX = 300      # 表の 1 列に収まる長さ。超える分は切る
 
 # --- 全体比較 (条件をまたいで設定を比べる) ---------------------------------
@@ -860,6 +862,13 @@ class State(object):
                 self.batches = batches + [b for b in (self.batches or [])
                                           if b.get("machine") in down]
                 self.collected_at = time.time()
+            # 学習曲線 (「学習曲線」タブ)。計画に入っている run のうち、進んだものだけ取り直す。
+            # 繋がらなかったホストは待たされるだけなので飛ばす
+            try:
+                self.update_curves([h for h in hosts if h["label"] not in down], rows,
+                                   conf.get("drop_root"))
+            except Exception as e:
+                sys.stderr.write("[curves] %s: %s\n" % (type(e).__name__, e))
         except Exception as e:                      # 画面を落とさない
             with self.lock:
                 self.errors = ["collect failed: %s: %s" % (type(e).__name__, e)]
@@ -867,6 +876,56 @@ class State(object):
         finally:
             with self.lock:
                 self.busy = False
+
+    def update_curves(self, hosts, rows, drop_root):
+        """計画に入っている run の学習曲線を CURVE_CACHE_PATH に貯める (変わった run だけ)."""
+        paths = self.plan_files()
+        if not paths:
+            return
+        conds = PLAN.parse_plans(paths)
+        planned = [d for d in rows if any(PLAN.matches(c, d) for c in conds)]
+        CR.fetch_metric_curves(hosts, planned, CURVE_CACHE_PATH, drop_root=drop_root,
+                               timeout=self.args.ssh_timeout)
+
+    def curves(self):
+        """「学習曲線」タブ用: 計画の章 (計画 x グループ x マップ x 台数 x t_max) ごとに、
+        そこに入っている run の曲線を並べる。条件と run の対応は train() の計画表と同じ."""
+        t = self.train()
+        cache = load_json(CURVE_CACHE_PATH)
+        chapters, order = {}, []
+        for c in t.get("plan") or []:
+            key = (c.get("plan"), c.get("group_order") or 0, c.get("label"))
+            if key not in chapters:
+                chapters[key] = {"plan": c.get("plan"), "group": c.get("group"),
+                                 "label": c.get("label"), "map": c.get("map"),
+                                 "agents": c.get("agents"), "t_max_m": c.get("t_max_m"),
+                                 "collect": c.get("collect"), "series": []}
+                order.append(key)
+            for s in c.get("slots") or []:
+                r = s.get("run")
+                # 失敗・短すぎる run は曲線を取らない (枠を埋めないので比較にも使わない)
+                if not r or r.get("excluded") or r.get("state") not in ("done", "running", "stalled"):
+                    continue
+                cv = cache.get(r.get("uid")) or {}
+                m = {}
+                for k, xy in (cv.get("m") or {}).items():
+                    # 画面に送る点は 300 点まで、値は小数 3 桁 (全計画で 12MB -> 数 MB)
+                    xs, ys = xy[0], xy[1]
+                    step = max(1, (len(xs) + 299) // 300)
+                    m[k] = [xs[::step] + ([xs[-1]] if (len(xs) - 1) % step else []),
+                            [None if v is None else round(v, 3) for v in
+                             ys[::step] + ([ys[-1]] if (len(ys) - 1) % step else [])]]
+                chapters[key]["series"].append({
+                    "uid": r.get("uid"), "machine": r.get("machine"), "seed": r.get("seed"),
+                    "state": r.get("state"), "progress": r.get("progress"),
+                    "t_last": r.get("t_last"), "t_max": r.get("t_max"),
+                    "setting": c.get("setting"), "mark": bool(c.get("mark")),
+                    "algo": c.get("algo"), "task_arrival": c.get("task_arrival"),
+                    "task_assign": c.get("task_assign") or "TP",
+                    "reassign": c.get("reassign"), "dynamic": c.get("dynamic"),
+                    "m": m})
+        return {"chapters": [chapters[k] for k in order],
+                "metrics": list(CR.CURVE_KEYS), "collected_at": t.get("collected_at")}
 
     def status(self):
         with self.lock:
@@ -951,6 +1010,7 @@ def make_routes(state):
     return {
         ("GET", "/api/train"): lambda body: state.train(),
         ("GET", "/api/eval"): lambda body: state.eval(),
+        ("GET", "/api/curves"): lambda body: state.curves(),
         ("GET", "/api/status"): lambda body: state.status(),
         ("GET", "/api/mini"): lambda body: state.mini(),
         ("POST", "/api/collect"): lambda body: {"started": state.collect()},

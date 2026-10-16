@@ -1606,6 +1606,7 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
                        if rec.get("cfg") is not None else rec.get("param_hash"))
     d["model"] = rec.get("model")
     d["lare"] = rec.get("lare")
+    d["curve_file"] = rec.get("curve_file")      # 共有フォルダ経由の学習曲線 (export_curves_drop)
     d["repo"] = rec.get("repo")
     d["duration"] = fmt_dur((stop or beat or now_utc()) - start) if start else ""
     d["last_seen"] = beat or stop or start
@@ -1663,6 +1664,201 @@ except ImportError:                                   # Python 2 系リモート
 def _script_source():
     with open(os.path.abspath(__file__), "rb") as f:
         return f.read()
+
+
+# ---- 学習曲線 (sacred の metrics.json) -----------------------------------------
+# ダッシュボードの「学習曲線」タブ用。TensorBoard の event ファイルは読まない
+# (リモートに tensorboard が無いと黙って空になる)。sacred の metrics.json は
+# 1 run 数十 MB あるので、**読むのは変わった run だけ**にする (fetch_metric_curves の
+# キャッシュ、export_drop の状態ファイル)。持ち帰るのは間引いた点列だけ
+CURVE_KEYS = ("test_task_completion_mean", "test_goal_mean",
+              "test_collision_mean", "test_return_mean")
+CURVE_MAX_POINTS = 600
+CURVE_CACHE_NAME = ".curve_cache.json"
+
+
+def _curve_val(v):
+    """metrics.json の値は普通は float。numpy が jsonpickle された形 ({"value": ...}) も受ける."""
+    if isinstance(v, dict):
+        v = v.get("value", v.get("py/reduce"))
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def read_metric_curves(run_dir, keys=CURVE_KEYS, max_points=CURVE_MAX_POINTS):
+    """{指標: [[t_env, ...], [値, ...]]} を返す. metrics.json が読めなければ None."""
+    try:
+        with open(os.path.join(run_dir, "metrics.json")) as f:
+            m = json.load(f)
+    except (OSError, IOError, ValueError):
+        return None
+    out = {}
+    for k in keys:
+        e = m.get(k)
+        if not isinstance(e, dict):
+            continue
+        st, va = e.get("steps") or [], e.get("values") or []
+        n = min(len(st), len(va))
+        if not n:
+            continue
+        if n > max_points > 1:
+            idx = sorted(set(int(round(i * (n - 1) / float(max_points - 1)))
+                             for i in range(max_points)))
+        else:
+            idx = range(n)
+        out[k] = [[st[i] for i in idx], [_curve_val(va[i]) for i in idx]]
+    return out
+
+
+def cmd_dump_curves(dirs):
+    """--dump-curves: run ディレクトリごとに 1 行の JSON を吐く (ssh 越しに呼ぶ)."""
+    for d in dirs:
+        d = os.path.expanduser(d)
+        sys.stdout.write(json.dumps({"run_dir": d, "m": read_metric_curves(d)},
+                                    ensure_ascii=True) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+def _curve_file_name(uid):
+    import hashlib
+    return "curves/%s.json" % hashlib.sha1(uid.encode("utf-8")).hexdigest()[:16]
+
+
+def export_curves_drop(records, drop_dir, state_path=None, dry_run=False):
+    """共有フォルダのホスト (黒) 側: 学習曲線を drop_dir/curves/ に書き出す.
+
+    metrics.json の更新時刻が前回の書き出しから変わった run だけを読み直す
+    (状態は state_path に持つ)。書き出した場所は rec["curve_file"] に入れ、
+    runs.jsonl に載せて集約側 (白) に伝える。
+    """
+    state_path = os.path.expanduser(state_path or "~/.ldrp/curve_export_state.json")
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except (OSError, IOError, ValueError):
+        state = {}
+    n_new = 0
+    for rec in records:
+        if rec.get("kind") in ("batch", "host") or not rec.get("run_dir"):
+            continue
+        p = os.path.join(rec["run_dir"], "metrics.json")
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        rel = _curve_file_name(rec["uid"])
+        dst = os.path.join(drop_dir, rel)
+        if state.get(rec["uid"]) == mt and os.path.exists(dst):
+            rec["curve_file"] = rel
+            continue
+        if dry_run:
+            n_new += 1
+            continue
+        m = read_metric_curves(rec["run_dir"])
+        if not m:
+            continue
+        try:
+            os.makedirs(os.path.dirname(dst))
+        except OSError:
+            pass
+        tmp = dst + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"uid": rec["uid"], "m": m}, f)
+        os.replace(tmp, dst)
+        state[rec["uid"]] = mt
+        rec["curve_file"] = rel
+        n_new += 1
+    if not dry_run:
+        try:
+            os.makedirs(os.path.dirname(state_path))
+        except OSError:
+            pass
+        with open(state_path + ".tmp", "w") as f:
+            json.dump(state, f)
+        os.replace(state_path + ".tmp", state_path)
+    sys.stderr.write("[export] %d learning curve(s) updated%s\n"
+                     % (n_new, " (dry run)" if dry_run else ""))
+    return n_new
+
+
+def fetch_metric_curves(hosts, rows, cache_path, drop_root=None, timeout=600):
+    """集約側 (白): rows の run の学習曲線を集めて cache_path に貯める.
+
+    取り直すのは「まだ無い」「前回から進んだ (t_last が変わった)」「状態が変わった」run だけ。
+    返り値: キャッシュ全体 {uid: {"t": t_last, "state": 状態, "m": {指標: [[x], [y]]}}}
+    """
+    try:
+        with open(cache_path) as f:
+            cache = json.load(f)
+    except (OSError, IOError, ValueError):
+        cache = {}
+    host_by_label = dict((h["label"], h) for h in hosts)
+    need = {}
+    for d in rows:
+        if d.get("state") not in ("done", "running", "stalled") or not d.get("run_dir"):
+            continue
+        c = cache.get(d["uid"])
+        if c and c.get("t") == d.get("t_last") and c.get("state") == d.get("state"):
+            continue
+        need.setdefault(d.get("machine"), []).append(d)
+    got = 0
+    for label, ds in need.items():
+        host = host_by_label.get(label)
+        if host is None:
+            continue
+        res = {}                                   # uid -> m
+        if host.get("drop"):
+            base = drop_dir_for(host, drop_root)
+            for d in ds:
+                if not base or not d.get("curve_file"):
+                    continue                       # 相手のスクリプトが旧版 (まだ書き出していない)
+                p = os.path.join(base, d["curve_file"])
+                try:
+                    tmp = p + ".read"
+                    copy_cloud_file(p, tmp)
+                    with open(tmp) as f:
+                        res[d["uid"]] = json.load(f).get("m")
+                    os.remove(tmp)
+                except (OSError, IOError, ValueError):
+                    continue
+        elif host.get("ssh") in (None, "", "local"):
+            for d in ds:
+                res[d["uid"]] = read_metric_curves(d["run_dir"])
+        else:
+            by_dir = dict((d["run_dir"], d["uid"]) for d in ds)
+            dirs = list(by_dir)
+            for i in range(0, len(dirs), 40):      # 引数が長くなりすぎないよう分ける
+                args = []
+                for d in dirs[i:i + 40]:
+                    args += ["--dump-curves", d]     # action="append" なので 1 つずつ付ける
+                recs, err = _collect_ssh_run(host, host.get("python") or "python3",
+                                             args, timeout, False, False)
+                if err:
+                    sys.stderr.write("[curves] %s: %s\n" % (label, err[:300]))
+                    break
+                for r in recs:
+                    if r.get("run_dir") in by_dir:
+                        res[by_dir[r["run_dir"]]] = r.get("m")
+        for d in ds:
+            if d["uid"] not in res:
+                continue                           # 届かなかった。次の収集で取り直す
+            # metrics.json が無い・壊れている run も「読んだ」と覚える (毎回取りに行かない)。
+            # 進めば t_last が変わるので取り直される
+            cache[d["uid"]] = {"t": d.get("t_last"), "state": d.get("state"),
+                               "m": res[d["uid"]] or {}}
+            got += 1
+    if got:
+        tmp = cache_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, cache_path)
+    if need:
+        sys.stderr.write("[curves] updated %d / %d run(s)\n"
+                         % (got, sum(len(v) for v in need.values())))
+    return cache
 
 
 def collect_local(host, tail_bytes, curves=None, curve_max_points=0):
@@ -1879,6 +2075,13 @@ def export_drop(records, rows, drop_dir, what="path", with_optimizer=False,
         except OSError:
             pass
         lare_todo.append((os.path.join(rec.get("repo") or ".", lr["rel"]), dst))
+
+    # 学習曲線 (ダッシュボードの「学習曲線」タブ用)。書き出した場所を runs.jsonl に
+    # 載せるので、進捗ファイルより先に済ませる。変わった run だけ読むので 2 回目以降は軽い
+    try:
+        export_curves_drop(records, drop_dir, dry_run=dry_run)
+    except Exception as e:                    # 曲線が書けなくても進捗は必ず届ける
+        sys.stderr.write("[export] curves: %s: %s\n" % (type(e).__name__, e))
 
     # --- 進捗ファイルを **先に** 書く ---------------------------------------
     # 440KB の runs.jsonl を 90MB のモデル転送の後ろに置くと、iCloud の
@@ -4890,6 +5093,9 @@ def main(argv=None):
         description="Collect LDRP training runs across machines and sync them to Notion.")
     p.add_argument("--scan", action="store_true",
                    help="scanner mode: emit one JSON line per run to stdout (used over ssh)")
+    p.add_argument("--dump-curves", action="append", default=None, metavar="RUN_DIR",
+                   help="emit the learning curves (metrics.json) of these sacred run "
+                        "directories as JSON lines (used over ssh by the dashboard)")
     p.add_argument("--repo", action="append", default=None,
                    help="repository root to scan (repeatable)")
     p.add_argument("--sacred-subdir", action="append", default=None,
@@ -5034,6 +5240,8 @@ def main(argv=None):
                    help="how often the pushed cron entry runs (default: 60 min)")
     args = p.parse_args(argv)
 
+    if args.dump_curves:
+        return cmd_dump_curves(args.dump_curves)
     if args.scan:
         args.machine = args.machine or os.uname()[1]
         args.repo = args.repo or [os.getcwd()]

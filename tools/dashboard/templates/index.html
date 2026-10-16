@@ -13,6 +13,7 @@
   <div class="bar">
     <button id="tab-train" class="tab on">学習の進捗</button>
     <button id="tab-eval"  class="tab">評価結果</button>
+    <button id="tab-curve" class="tab">学習曲線</button>
     <span class="sep"></span>
     <button id="collect">今すぐ収集</button>
     <label><input type="checkbox" id="auto" checked> 自動更新</label>
@@ -87,6 +88,48 @@
   </div>
   <div id="e-chart"></div>
   <div class="wrap"><table id="e-tbl"></table></div>
+</section>
+
+<!-- ── 学習曲線 ─────────────────────────────────────────────── -->
+<!-- 計画の章 (同じマップ・台数・t_max) ごとに、そこに入っている run の学習曲線を 1 枚に重ねる -->
+<section id="pane-curve" hidden>
+  <div class="bar filters">
+    <span><label>計画</label><select id="c-plan"></select></span>
+    <span><label>指標</label><select id="c-metric"></select></span>
+    <span><label>map</label><select id="c-map"></select></span>
+    <span><label>N</label><select id="c-n"></select></span>
+    <span><label>setting</label><select id="c-setting"></select></span>
+    <span><label>版</label><select id="c-ver"></select></span>
+    <span><label>algo</label><select id="c-algo"></select></span>
+    <span><label>assign</label><select id="c-assign"></select></span>
+    <span><label>reassign</label><select id="c-reassign"></select></span>
+    <span><label>machine</label><select id="c-machine"></select></span>
+    <span><label>状態</label><select id="c-state">
+      <option value="">(all)</option><option>done</option><option>running</option><option>stalled</option>
+    </select></span>
+    <span class="right mut" id="c-counts"></span>
+  </div>
+  <div class="bar filters">
+    <span><label>色</label><select id="c-color">
+      <option value="setting">setting</option><option value="assign">assign</option>
+      <option value="reassign">reassign</option><option value="machine">machine</option>
+      <option value="cond">条件ごと</option>
+    </select></span>
+    <span><label>線種</label><select id="c-dash">
+      <option value="assign">assign (TP 実線 / PPO 破線)</option>
+      <option value="reassign">reassign (F 実線 / T 破線)</option>
+      <option value="">なし</option>
+    </select></span>
+    <span><label>平滑化</label><select id="c-smooth">
+      <option value="1">なし</option><option value="5" selected>5 点</option>
+      <option value="10">10 点</option><option value="20">20 点</option>
+    </select></span>
+    <span title="同じ条件の seed をまとめて 1 本にする (seed が 1 本なら変わらない)">
+      <label><input type="checkbox" id="c-mean"> 条件で平均</label></span>
+    <span><label><input type="checkbox" id="c-lare"> LaRe モデル学習の章も出す</label></span>
+    <span class="mut">凡例をクリックすると、その線を消す / 戻す</span>
+  </div>
+  <div id="c-body"></div>
 </section>
 
 <script src="/static/app.js"></script>
