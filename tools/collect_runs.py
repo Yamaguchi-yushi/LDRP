@@ -175,6 +175,7 @@ HASH_EXCLUDE_TOP = frozenset((
     "seed", "checkpoint_path", "load_step", "local_results_path", "label",
     "repeat_id", "evaluate", "render", "save_replay", "use_tensorboard",
     "use_cuda", "save_model", "save_model_interval",
+    "test_interval",    # テストの間隔は学習曲線の点の間隔だけで、学習には効かない
 ))
 # lare_device は cpu / cuda の実行環境であって実験条件ではない。
 # GPU 機と Mac で同じ条件を回すと必ず割れるので外す
@@ -192,6 +193,7 @@ HASH_DEPENDENT = (
     ("use_finetuning_lare_path", ("finetuning_lare_path_model_name",)),
     ("use_dynamic_agents", ("randomize_initial_active", "min_active_agents",
                             "max_active_agents", "initial_active_num")),
+    ("use_lare_task", ("use_lare_task_training",)),
 )
 
 
@@ -216,29 +218,62 @@ def _norm_reward_list(v):
     return v
 
 
-def param_fields(cfg_full, env_full):
+def param_fields(cfg_full, env_full, dropped=None):
     """実験条件として意味を持つパラメータだけに正規化した dict を返す.
 
     param_hash も条件間の差分表示も**必ずこれを通す**。別々に正規化すると
     「ハッシュは同じなのに差分が出る」ような食い違いが起きる。
+
+    dropped に set を渡すと、「この run では使われない」として規則で外したキー
+    ("env.mmpp_ratio" など) を入れて返す。条件をまたいで比べるとき (dashboard の
+    global_param_diff)、外したキーを「値が無い」と比べて警告しないために使う。
     """
     top = dict((k, v) for k, v in (cfg_full or {}).items()
                if k not in HASH_EXCLUDE_TOP)
     env = dict((k, v) for k, v in (env_full or {}).items()
                if k not in HASH_EXCLUDE_ENV)
+
+    def drop(k):
+        # キーが無い古い run でも「この run では使われない」ことは同じなので記録する
+        if dropped is not None:
+            dropped.add("env." + k)
+        env.pop(k, None)
+
     # 有効化フラグが off のとき無視されるキーを落とす
     for flag, dependents in HASH_DEPENDENT:
         if not env.get(flag, False):
             for k in dependents:
-                env.pop(k, None)
+                drop(k)
+    # 事前学習 (固定) が指定されていると追加学習の指定は無視される
+    # (drp_env.py の _init_lare_path: finetuning = ... and not pretrained)
+    if env.get("use_pretrained_lare_path") and env.get("pretrained_lare_path_model_name"):
+        for k in ("use_finetuning_lare_path", "finetuning_lare_path_model_name"):
+            drop(k)
+    # 動的台数の初期台数: ランダムに引くなら max_active_agents、引かないなら
+    # initial_active_num だけが使われる (drp_env.py の reset)。min_active_agents は
+    # 稼働を止めてよい下限としても使う (ppo.py) ので残す
+    if env.get("use_dynamic_agents"):
+        drop("initial_active_num" if env.get("randomize_initial_active")
+             else "max_active_agents")
     # randomize_task_arrival が真なら固定値側は使われない
     if env.get("randomize_task_arrival"):
         for k in ("task_arrival", "task_density"):
-            env.pop(k, None)
+            drop(k)
     # task_arrival="fixed" は毎ステップ 1 件で、task_density を使わない
     # (EE_map.create_tasklist の mode == 'fixed' の分岐)
-    elif env.get("task_arrival", "fixed") == "fixed":
-        env.pop("task_density", None)
+    # mmpp も task_density を使わない (p_high / p_low だけ)
+    elif env.get("task_arrival", "fixed") in ("fixed", "mmpp"):
+        drop("task_density")
+    if not env.get("randomize_task_arrival"):
+        # ランダム化の範囲は、randomize_task_arrival=True のときだけ読まれる
+        # (drp_env.py の reset → _sample_task_arrival)
+        for k in ("mmpp_ratio", "rand_p_min", "rand_p_max"):
+            drop(k)
+        # MMPP の値は task_arrival="mmpp" のときだけ使う (EE_map.create_tasklist)。
+        # ランダム化ありでは MMPP が引かれうるので残す
+        if env.get("task_arrival", "fixed") != "mmpp":
+            for k in ("task_p_high", "task_p_low", "task_switch_prob"):
+                drop(k)
     # 環境報酬 (goal / collision / wait / move)。既定値から変えた run だけキーが残り、
     # 同じ条件の他の seed や他の条件と違えば params✗ / 他と違う の警告になる
     if "reward_list" in env:
@@ -1468,9 +1503,12 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
     d["lare_factor_version"] = fver
     if fver != 1:
         d["setting"] = "%s F%d" % (d["setting"], fver)
-    elif d["lare_mode"] == "scratch":
+    elif d["lare_mode"] in ("scratch", "scratch(frozen)"):
         # 版 1 の scratch (LaRe を run の中で一から学習) も " F1" を付ける。
-        # 付けないと LaRe なしの run と同じ "safe" になり、計画表で区別できない
+        # 付けないと LaRe なしの run と同じ "safe" になり、計画表で区別できない。
+        # use_lare_path_training=False (= "scratch(frozen)") でも LaRe のデコーダは学習される
+        # (このフラグは方策の報酬を LaRe に差し替えるかだけ)。LaRe モデル学習の run は
+        # この設定で回すので、同じく F1 を付ける (2026-10-27)
         d["setting"] = "%s F1" % d["setting"]
 
     # task arrival 列
@@ -1575,7 +1613,8 @@ def derive(rec, stale_minutes, method_tag_map=None, expected_t_max=None,
     # LaRe-Path の評価関数の版 2 以降は、評価用モデルの名前のタグにも版を付ける
     # (例: safe -> safe_f2)。付けないと LaRe なし / 版 1 のモデルと同じ名前になる
     # 版 1 の scratch も _f1 を付ける (LaRe なしの評価用モデルと同じ名前にしないため)
-    if d.get("lare_factor_version", 1) != 1 or d.get("lare_mode") == "scratch":
+    if (d.get("lare_factor_version", 1) != 1
+            or d.get("lare_mode") in ("scratch", "scratch(frozen)")):
         d["method_tag"] = "%s_f%d" % (d["method_tag"] or "safe", d.get("lare_factor_version", 1))
     # 学習時の到着率の範囲が既定 U(0.01, 0.10) と違う run は、タグに範囲を足す
     # (例: safe -> safe_p0.01-0.15)。足さないと評価用のファイル名が既定の run と
@@ -1845,6 +1884,8 @@ def fetch_metric_curves(hosts, rows, cache_path, drop_root=None, timeout=600):
         for d in ds:
             if d["uid"] not in res:
                 continue                           # 届かなかった。次の収集で取り直す
+            if not res[d["uid"]] and d.get("state") == "running":
+                continue                           # 書き込み中の metrics.json を読んだだけ。次で取り直す
             # metrics.json が無い・壊れている run も「読んだ」と覚える (毎回取りに行かない)。
             # 進めば t_last が変わるので取り直される
             cache[d["uid"]] = {"t": d.get("t_last"), "state": d.get("state"),
@@ -3279,6 +3320,41 @@ def copy_cloud_file(src, dst):
         pass
 
 
+def copy_cloud_file_checked(src, dst, tries=3, wait=5.0):
+    """copy_cloud_file の後で大きさを確かめ、合わなければやり直す.
+
+    同期の途中 (実体がまだ届いていない) のファイルをコピーすると、例外を出さずに
+    **0 バイトのファイル**ができることがある (実測: 黒 24 件・M2 5 件)。
+    回収済みの判定は「ディレクトリが空でないか」なので、0 バイトのまま残ると
+    二度と取り直されない。合わなければ消して False を返す (次の回で取り直す)。
+    """
+    import time
+    want = os.path.getsize(src)
+    for k in range(tries):
+        try:
+            copy_cloud_file(src, dst)
+        except OSError:
+            pass
+        if os.path.exists(dst) and os.path.getsize(dst) == want and want > 0:
+            return True
+        if k + 1 < tries:
+            time.sleep(wait)
+    try:
+        os.remove(dst)
+    except OSError:
+        pass
+    return False
+
+
+def local_copy_ok(path, size=None):
+    """回収済みのファイルが使える状態か (0 バイトでない・大きさが記録と一致)."""
+    try:
+        got = os.path.getsize(path)
+    except OSError:
+        return False
+    return got > 0 and (not size or got == size)
+
+
 def _fetch_drop(host, drop_root, items):
     """共有フォルダに置かれたモデルをコピーする (--export 済みのホスト用)."""
     import shutil
@@ -3298,7 +3374,10 @@ def _fetch_drop(host, drop_root, items):
                 os.makedirs(os.path.dirname(dst))
             except OSError:
                 pass
-            copy_cloud_file(src, dst)
+            if not copy_cloud_file_checked(src, dst):
+                sys.stderr.write("[fetch] %s: %s/%s did not copy completely "
+                                 "(still syncing?); will retry next round\n"
+                                 % (host["label"], export_dir, sub))
     return None
 
 
@@ -3781,7 +3860,7 @@ def purge_drop_models(planned, hosts, drop_root, dry_run=False):
         b = drop_dir_for(h, drop_root)
         if b:
             bases[h["label"]] = b
-    removed, freed, kept = 0, 0, 0
+    removed, freed, kept, already = 0, 0, 0, 0
     for d, out_dir, files in planned:
         base = bases.get(d.get("machine"))
         export_dir = (d.get("model") or {}).get("export_dir")
@@ -3801,8 +3880,11 @@ def purge_drop_models(planned, hosts, drop_root, dry_run=False):
                 ok = False
                 break
             targets.append(src)
-        if not ok or not targets:
+        if not ok:
             kept += 1
+            continue
+        if not targets:
+            already += 1                      # 前の回で消し済み (.fetched だけ残っている)
             continue
         for t in targets:
             freed += os.path.getsize(t)
@@ -3819,8 +3901,8 @@ def purge_drop_models(planned, hosts, drop_root, dry_run=False):
             except OSError:
                 pass
     sys.stderr.write("[purge] %d model dir(s) cleared (%.1f MB freed), "
-                     "%d kept because the local copy did not match%s\n"
-                     % (removed, freed / 1e6, kept,
+                     "%d already cleared, %d kept because the local copy did not match%s\n"
+                     % (removed, freed / 1e6, already, kept,
                         " (dry run)" if dry_run else ""))
     return removed
 
@@ -3847,10 +3929,18 @@ def fetch_models(hosts, rows, dest, what="path", with_optimizer=False,
         out_dir = os.path.join(dest, str(d.get("machine")), model_dest_name(d))
         files = select_model_files(model, what, with_optimizer, with_mixer,
                                    with_critic)
-        if os.path.isdir(out_dir) and os.listdir(out_dir):
+        # 置いてあるファイルが 0 バイト・大きさ違いなら取り直す (上書きになる)。
+        # 置いていないファイルは問わない (送信側で欠けている run を毎回取りに行かないため)
+        broken = [sub for _r, sub, z in files
+                  if os.path.exists(os.path.join(out_dir, sub))
+                  and not local_copy_ok(os.path.join(out_dir, sub), z)]
+        if os.path.isdir(out_dir) and os.listdir(out_dir) and not broken:
             skipped += 1
             present.append((d, out_dir, files))
             continue
+        if broken:
+            sys.stderr.write("[fetch] re-fetching %s: incomplete local copy (%s)\n"
+                             % (os.path.relpath(out_dir, dest), ", ".join(broken)))
         if not files:
             continue
         size_mb = sum(z for _r, _s, z in files) / 1e6
@@ -4124,7 +4214,7 @@ def publish_models(planned, repo_dir, dry_run=False, hint=True, seed_idx=None,
     repo_dir = os.path.abspath(os.path.expanduser(repo_dir))
     published = skipped = 0
     lines = []
-    refused, tmax_warn, unplanned, lare_only = 0, 0, 0, 0
+    refused, tmax_warn, unplanned, lare_only, broken_src = 0, 0, 0, 0, 0
     # 「LaRe モデル学習」の条件 (計画表の <!-- collect: lare -->) は LaRe の .pth が
     # 目当てで、方策モデルは使わない。そこにしか一致しない run の方策は保管しない
     lare_conds = [c for c in (conds or []) if c.get("collect") == "lare"]
@@ -4184,6 +4274,10 @@ def publish_models(planned, repo_dir, dry_run=False, hint=True, seed_idx=None,
             if os.path.basename(sub).endswith("opt.th"):
                 continue
             src = os.path.join(out_dir, sub)
+            # 0 バイト (回収が途中で切れたもの) は置かない。次の回収で取り直される
+            if os.path.exists(src) and not local_copy_ok(src):
+                broken_src += 1
+                continue
             # dry run では回収前なのでファイルがまだ無い。配置先だけ見せる
             if os.path.exists(src) or dry_run:
                 for pn in targets:
@@ -4191,10 +4285,13 @@ def publish_models(planned, repo_dir, dry_run=False, hint=True, seed_idx=None,
                                  publish_names(d, sub, s_idx)))
         if not srcs:
             continue
-        # 置き換えるのは「同じ名前のファイルの持ち主が除外した run」のときだけ
+        # 置き換えるのは「同じ名前のファイルの持ち主が除外した run」のときと、
+        # 置いてあるものが回収元と大きさが違う (0 バイトで置かれた) ときだけ
         if all(os.path.exists(os.path.join(repo_dir, r, n))
                and owner.get("%s/%s" % (r, n)) not in excluded_uids
-               for _s, r, n in srcs):
+               and (dry_run or not os.path.exists(s)
+                    or os.path.getsize(os.path.join(repo_dir, r, n)) == os.path.getsize(s))
+               for s, r, n in srcs):
             skipped += 1
             continue
         for _s, r, n in srcs:
@@ -4258,6 +4355,9 @@ def publish_models(planned, repo_dir, dry_run=False, hint=True, seed_idx=None,
     sys.stderr.write("[publish] %d placed, %d already there -> %s%s\n"
                      % (published, skipped, repo_dir,
                         " (dry run)" if dry_run else ""))
+    if broken_src:
+        sys.stderr.write("[publish] %d file(s) skipped: empty local copy "
+                         "(will be placed after it is re-fetched)\n" % broken_src)
     if unplanned:
         sys.stderr.write("[publish] %d run(s) skipped: not in any plan\n" % unplanned)
     if lare_only:
@@ -5511,6 +5611,14 @@ def main(argv=None):
                               timeout=args.fetch_timeout,
                               dry_run=args.fetch_dry_run or not args.fetch_models,
                               drop_root=drop_root)
+            # 計画内の LaRe モデル学習が完了していれば、できたモデルを models/ に置く
+            # (tools/lare_models.py の auto_install。models/ にあるものは上書きしない)
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import plan as _PLAN
+            import lare_models as _LM
+            _LM.auto_install(_PLAN.parse_plans(_PLAN.find_plans(args.plan)), targets,
+                             _PLAN.matches,
+                             dry_run=args.fetch_dry_run or not args.fetch_models)
         except Exception as e:
             sys.stderr.write("[lare] %s: %s\n" % (type(e).__name__, e))
         planned, _n = fetch_models(

@@ -121,6 +121,52 @@ def find_for(cond, files=None):
     return sorted(hit, key=lambda f: (order.get(f["where"], 9), -f["mtime"]))
 
 
+MODELS_DIR = LARE_DIRS[0][1]
+# 自動で models/ に置かない計画 (追跡用・検討中のもの)
+AUTO_INSTALL_SKIP_PLANS = ("watch",)
+
+
+def auto_install(conds, rows, matches, dry_run=False, log=None):
+    """計画内の LaRe モデル学習が完了したら、できたモデルを src/lare/path/models/ にコピーする.
+
+    conds:   計画の条件 (plan.parse_plans の結果)。collect: lare の条件だけ見る
+    rows:    run (collect_runs.derive の結果)。条件に一致する done の run があるものだけ置く
+             (同じ名前の古いファイルを、学習の終わっていない条件に置かないため)
+    matches: plan.matches
+    置くのは「その条件が作るモデル」= 系列の最後の段がこの章の t_max のファイルだけ
+    (途中の 0.5M ごとのファイルは名前の学習量が違うので当たらない)。
+    models/ に同じ名前があれば何もしない (上書きしない)。コピーなので元は残る。
+    返り値: 置いたファイル名のリスト
+    """
+    import shutil
+    log = log or (lambda m: sys.stderr.write(m + "\n"))
+    files = scan()
+    in_models = set(f["name"] for f in files if f["where"] == "models")
+    done = [d for d in rows if d.get("state") == "done"]
+    placed = []
+    for c in conds:
+        if c.get("collect") != "lare" or c.get("plan") in AUTO_INSTALL_SKIP_PLANS:
+            continue
+        hit = find_for(c, files)
+        if not hit or hit[0]["where"] == "models":
+            continue                              # 無い / もう置いてある
+        if not any(matches(c, d) for d in done):
+            continue                              # この条件の学習がまだ終わっていない
+        f = hit[0]
+        if f["name"] in in_models:
+            continue
+        dst = os.path.join(MODELS_DIR, f["name"])
+        log("[lare] install %s (%s%s) -> src/lare/path/models/%s"
+            % (f["name"], f["where"], "/" + f["machine"] if f.get("machine") else "",
+               " (dry run)" if dry_run else ""))
+        if not dry_run:
+            shutil.copy2(f["path"], dst)
+            os.chmod(dst, 0o644)                  # iCloud 経由のファイルは 600 になっていることがある
+            in_models.add(f["name"])
+        placed.append(f["name"])
+    return placed
+
+
 def main():
     for f in scan():
         print("%-12s F%d %-5s %-45s %s" % (f["where"], f["version"], f["algo"] or "-",

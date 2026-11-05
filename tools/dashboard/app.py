@@ -162,19 +162,29 @@ def global_param_diff(rows):
     for ds in groups.values():
         if len(ds) < GLOBAL_MIN_GROUP:
             continue
-        fields = [CR.param_fields(d.get("cfg"), d.get("env")) for d in ds]
+        # dropped: その run では使われないとして param_fields が外したキー
+        # (fixed の run の mmpp_ratio など)。そのキーの比較からはその run を除く。
+        # 除かないと「無い」が 1 つの値として多数派 (0.5 など) と違って見える
+        fields, dropped = [], []
+        for d in ds:
+            dr = set()
+            fields.append(CR.param_fields(d.get("cfg"), d.get("env"), dropped=dr))
+            dropped.append(dr)
         keys = set().union(*fields) - GLOBAL_SKIP_KEYS - set(CR.HASH_IGNORE_FIELDS)
         for k in sorted(keys):
-            vals = [_norm(f.get(k)) for f in fields]
+            use = [(d, f) for d, f, dr in zip(ds, fields, dropped) if k not in dr]
+            if len(use) < GLOBAL_MIN_GROUP:
+                continue
+            vals = [_norm(f.get(k)) for _d, f in use]
             count = Counter(vals)
             if len(count) < 2:
                 continue
             major, n_major = count.most_common(1)[0]
-            if n_major < len(ds) * GLOBAL_MAJORITY:
+            if n_major < len(use) * GLOBAL_MAJORITY:
                 continue
-            ref = ds[vals.index(major)]
+            ref = use[vals.index(major)][0]
             off = defaultdict(list)
-            for d, v in zip(ds, vals):
+            for (d, _f), v in zip(use, vals):
                 if v != major:
                     off[(d["condition"], v)].append(d)
             for (cond, _v), xs in off.items():
@@ -182,7 +192,7 @@ def global_param_diff(rows):
                     "key": k,
                     "expected": _raw_param(ref, k),
                     "actual": _raw_param(xs[0], k),
-                    "n_this": len(xs), "n_major": n_major, "n_group": len(ds),
+                    "n_this": len(xs), "n_major": n_major, "n_group": len(use),
                 })
     return out
 
@@ -252,7 +262,9 @@ class State(object):
         """
         n = max(1, int(self.args.collect_every))
         while True:
-            time.sleep(n * 60)
+            # 繋がらないホストがあるときは 2 分後に試し直す (スリープ明け・VPN の再接続待ちで
+            # 一時的に失敗しただけなら、15 分も「確認できません」のままにしない)
+            time.sleep(min(n * 60, 120) if self.unreachable else n * 60)
             if not self.busy:
                 self.collect()
 
@@ -527,13 +539,20 @@ class State(object):
             # run ごとの「どの計画の枠に入っているか」(running now に出す)。
             # 1 つの run が複数の計画に数えられることがある (AAMAS と reassign 等)
             plans_of = {}
+            # 方策モデルを保管する枠に入っている run。「LaRe モデル学習」の枠
+            # (collect: lare) は LaRe の .pth が目当てで方策は保管しないので、
+            # machine 表の「モデル回収」の分母に入れない (入れると永久に満たない)
+            policy_uids = set()
             for c in plan:
                 for sl in c.get("slots") or []:
                     u = (sl.get("run") or {}).get("uid")
+                    if u and c.get("collect") != "lare":
+                        policy_uids.add(u)
                     if u and c.get("plan") and c["plan"] not in plans_of.setdefault(u, []):
                         plans_of[u].append(c["plan"])
             for r in data["runs"]:
                 r["in_plan"] = r["uid"] in used
+                r["policy_plan"] = r["uid"] in policy_uids
                 r["plans"] = plans_of.get(r["uid"], [])
             self.attach_global_diff(plan, [d for d in live if d["uid"] in used])
             data["plan"] = plan
@@ -808,6 +827,11 @@ class State(object):
                 with self.lock:
                     self.errors = [("config", msg)]
                 return
+            # collect_runs の「失敗した ssh ホストは 10 分試さない」は、1 回の実行で何度も
+            # 呼ぶ CLI 用。ダッシュボードは 15 分おきにしか収集しないので毎回ちゃんと試す。
+            # 残しておくと、スリープ明けなどに 1 回失敗しただけで次の収集が "skipped" になり、
+            # 繋がっているのに「確認できません」が続き、本当の失敗理由も隠れる (2026-10-17)
+            CR._SSH_BACKOFF.clear()
             raw, errors = CR.collect(hosts, conf.get("tail_bytes") or 65536,
                                      self.args.ssh_timeout,
                                      drop_root=conf.get("drop_root"),
@@ -886,6 +910,12 @@ class State(object):
         planned = [d for d in rows if any(PLAN.matches(c, d) for c in conds)]
         CR.fetch_metric_curves(hosts, planned, CURVE_CACHE_PATH, drop_root=drop_root,
                                timeout=self.args.ssh_timeout)
+        # 計画内の LaRe モデル学習が完了していれば、できたモデルを models/ に置く
+        # (launchd の定期回収と同じ処理。models/ にあるものは上書きしない)
+        try:
+            LM.auto_install(conds, rows, PLAN.matches)
+        except Exception as e:
+            sys.stderr.write("[lare] install: %s: %s\n" % (type(e).__name__, e))
 
     def curves(self):
         """「学習曲線」タブ用: 計画の章 (計画 x グループ x マップ x 台数 x t_max) ごとに、
@@ -1169,10 +1199,10 @@ def main(argv=None):
     p.add_argument("--ssh-timeout", type=int, default=180)
     p.add_argument("--collect-on-start", action="store_true",
                    help="起動時に 1 回収集する (既定はキャッシュを読むだけ)")
-    p.add_argument("--collect-every", type=int, default=15, metavar="MIN",
-                   help="この分数ごとに裏で収集する (0 で無効。既定 15)。"
-                        "共有フォルダ側が 1 時間おきにしか更新されないので、"
-                        "これより短くしても情報は増えない")
+    p.add_argument("--collect-every", type=int, default=5, metavar="MIN",
+                   help="この分数ごとに裏で収集する (0 で無効。既定 5)。"
+                        "学習曲線を学習中に追うため 5 分にしてある (GPU は ssh で 10 秒ほど)。"
+                        "共有フォルダのホスト (黒) は相手が 15 分おきに書き出すので、それより細かくはならない")
     args = p.parse_args(argv)
 
     state = State(args)
