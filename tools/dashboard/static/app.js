@@ -264,7 +264,10 @@ function renderTrain() {
       m.done++;
       // 回収は計画内の run だけが対象なので、計画外を分母に入れない。
       // 入れると「全部回収済みでも 112/182」になり、未回収との区別が付かない
-      if (r.in_plan) { m.planDone++; if ((r.saved || []).length) m.planSaved++; }
+      // LaRe モデル学習の枠だけに入る run (方策を保管しない) も分母に入れない
+      if (r.in_plan && r.policy_plan !== false) {
+        m.planDone++; if ((r.saved || []).length) m.planSaved++;
+      }
     } else if (["stalled", "failed", "short"].includes(r.state)) m.bad++;
   });
   // 「情報がいつのものか」を machine 表の主役にする。これが無いと
@@ -294,8 +297,8 @@ function renderTrain() {
       // 回収が済んでいても埋まらない
       const nd = m.planDone, ns = m.planSaved;
       const skip = m.done - nd;
-      const tip = `計画内の完了 ${nd} 本のうち ${ns} 本を回収済み`
-                + (skip ? ` (計画外の完了 ${skip} 本は対象外)` : "");
+      const tip = `方策を保管する計画内の完了 ${nd} 本のうち ${ns} 本を回収済み`
+                + (skip ? ` (計画外・LaRe モデル学習の完了 ${skip} 本は対象外)` : "");
       const got = nd ? `<span class="${ns >= nd ? "c-ok" : "wrn"}" title="${esc(tip)}">${ns}/${nd}</span>`
                      : `<span class="mut" title="${esc(tip)}">-</span>`;
       if (UNREACH()[k]) fresh = unkChip(k, b && b.data_age_sec != null
@@ -1277,6 +1280,7 @@ async function poll() {
 // 計画の章 (計画 x マップ x 台数 x t_max) ごとに 1 枚の図。線 1 本 = run 1 本
 // (「条件で平均」なら条件 1 本)。値は sacred の metrics.json を間引いたもの
 let CURVE = null;
+let CURVE_WANT = "";                     // URL の #curve/<計画名> で開く計画
 const CURVE_HIDDEN = new Set();          // 凡例で消した線 (章ラベル|系列キー)
 const CURVE_PALETTE = ["#0969da", "#cf222e", "#1a7f37", "#8250df", "#bc4c00", "#0f6b6b",
                        "#9a6700", "#e85aad", "#57606a", "#2da44e", "#6639ba", "#fb8f44"];
@@ -1288,16 +1292,39 @@ const METRIC_LABEL = {
 };
 const curVer = s => { const m = / F(\d+)$/.exec(normSetting(s.setting)); return m ? "F" + m[1] : "F1"; };
 const curRe = s => s.reassign == null ? "-" : (s.reassign ? "T" : "F");
-const curCond = s => `${normSetting(s.setting)} / ${String(s.algo || "").toUpperCase()} / ${s.task_assign} / re ${curRe(s)}`;
+// 絞り込み・色分け・凡例に使えるパラメータ。**計画の中で値が 2 通り以上あるものだけ**画面に出す
+// (計画ごとに振っている軸が違う: lare_factor は事前学習の経路と版、arrival_range は到着率の範囲)。
+// cond: true = 条件を決める軸 (凡例の名前・「条件で平均」のまとめ方に使う)
+const CURVE_FIELDS = [
+  { k: "setting",  label: "setting",  cond: true,  get: s => normSetting(s.setting) },
+  { k: "ver",      label: "版",       cond: false, get: curVer },
+  { k: "algo",     label: "algo",     cond: true,  get: s => String(s.algo || "").toUpperCase() },
+  { k: "arrival",  label: "arrival",  cond: true,  get: s => s.task_arrival || "-" },
+  { k: "assign",   label: "assign",   cond: true,  get: s => s.task_assign || "TP" },
+  { k: "reassign", label: "reassign", cond: true,  get: s => "re " + curRe(s) },
+  { k: "dynamic",  label: "dynamic",  cond: true,  get: s => s.dynamic ? "dyn" : "no dyn" },
+  { k: "machine",  label: "machine",  cond: false, get: s => s.machine || "?" },
+  { k: "state",    label: "状態",     cond: false, get: s => s.state },
+];
+const CF_SEL = {};                       // 絞り込みで選んでいる値 (計画を変えても残す)
+let CF_VARY = [];                        // 今の計画で値が割れているパラメータ
+const cfOf = k => CURVE_FIELDS.find(f => f.k === k);
+// 凡例の名前: 割れている「条件の軸」だけを並べる (全部同じなら setting だけ)
+const curCond = s => {
+  const ks = CF_VARY.filter(f => f.cond);
+  return (ks.length ? ks : [cfOf("setting")]).map(f => f.get(s)).join(" / ");
+};
 
 async function loadCurves() {
-  $("c-body").innerHTML = `<div class="mut">読み込み中…</div>`;
+  // 2 回目以降 (自動の取り直し) は表示を消さない。消すと 1 分おきに画面がちらつく
+  if (!CURVE) $("c-body").innerHTML = `<div class="mut">読み込み中…</div>`;
   CURVE = await api("/api/curves");
   const plans = uniq(CURVE.chapters, "plan");
   const pl = $("c-plan"), cur = pl.value;
   pl.innerHTML = plans.map(p => `<option>${esc(p)}</option>`).join("");
-  // 既定は lare_factor (無ければ、曲線のある run がいちばん多い計画)
-  if (plans.includes(cur)) pl.value = cur;
+  // URL で指定された計画 (#curve/<計画名>) > 今選んでいる計画 > lare_factor > 一覧の最初
+  if (plans.includes(CURVE_WANT)) { pl.value = CURVE_WANT; CURVE_WANT = ""; }
+  else if (plans.includes(cur)) pl.value = cur;
   else if (plans.includes("lare_factor")) pl.value = "lare_factor";
   const ms = $("c-metric"), mcur = ms.value;
   ms.innerHTML = CURVE.metrics.map(m => `<option value="${m}">${esc(METRIC_LABEL[m] || m)}</option>`).join("");
@@ -1305,17 +1332,38 @@ async function loadCurves() {
   fillCurveFilters();
   renderCurves();
 }
+// 計画が決まったら、その計画で値が割れているパラメータを調べて絞り込み・色・線種の選択肢を作る
 function fillCurveFilters() {
-  const S = CURVE.chapters.filter(ch => ch.plan === $("c-plan").value)
-    .flatMap(ch => ch.series.map(s => Object.assign({ map: ch.map, agents: ch.agents }, s)));
-  fillSelect($("c-map"), uniq(S, "map"));
-  fillSelect($("c-n"), uniq(S, "agents"));
-  fillSelect($("c-setting"), [...new Set(S.map(s => normSetting(s.setting)))].sort());
-  fillSelect($("c-ver"), [...new Set(S.map(curVer))].sort());
-  fillSelect($("c-algo"), uniq(S, "algo"));
-  fillSelect($("c-assign"), uniq(S, "task_assign"));
-  fillSelect($("c-reassign"), [...new Set(S.map(curRe))].sort());
-  fillSelect($("c-machine"), uniq(S, "machine"));
+  const chs = CURVE.chapters.filter(ch => ch.plan === $("c-plan").value
+    && ($("c-lare").checked || ch.collect !== "lare"));
+  const S = chs.flatMap(ch => ch.series.map(s => Object.assign({ map: ch.map, agents: ch.agents }, s)));
+  fillSelect($("c-map"), uniq(chs, "map"));
+  fillSelect($("c-n"), uniq(chs, "agents"));
+  CF_VARY = CURVE_FIELDS.filter(f => new Set(S.map(f.get)).size > 1);
+  $("c-dyn").innerHTML = CF_VARY.map(f => {
+    const vals = [...new Set(S.map(f.get))].sort();
+    const cur = vals.includes(CF_SEL[f.k]) ? CF_SEL[f.k] : "";
+    CF_SEL[f.k] = cur;
+    return `<span><label>${esc(f.label)}</label><select data-cf="${f.k}">`
+      + `<option value="">(all)</option>`
+      + vals.map(v => `<option${v === cur ? " selected" : ""}>${esc(v)}</option>`).join("")
+      + `</select></span>`;
+  }).join("") || `<span class="mut">この計画で振っているパラメータはありません</span>`;
+  // 色・線種に選べるのも、割れているパラメータだけ
+  const opts = CF_VARY.filter(f => f.k !== "state");
+  const col = $("c-color"), ccur = col.value;
+  col.innerHTML = opts.map(f => `<option value="${f.k}">${esc(f.label)}</option>`).join("")
+    + `<option value="cond">条件ごと</option>`;
+  // 既定の色: setting が割れていれば setting、無ければ割れている最初の「条件の軸」(arrival など)
+  const firstCond = opts.find(f => f.cond);
+  col.value = col.dataset.user && [...col.options].some(o => o.value === ccur) ? ccur
+    : (opts.some(f => f.k === "setting") ? "setting" : (firstCond ? firstCond.k : "cond"));
+  // 既定の線種: 色に使っていない assign > reassign。自分で選んだら (data-user) それを残す
+  const dsh = $("c-dash"), dcur = dsh.value;
+  dsh.innerHTML = `<option value="">なし</option>`
+    + opts.filter(f => f.k !== col.value).map(f => `<option value="${f.k}">${esc(f.label)}</option>`).join("");
+  const dflt = ["assign", "reassign"].find(k => k !== col.value && opts.some(f => f.k === k)) || "";
+  dsh.value = dsh.dataset.user && [...dsh.options].some(o => o.value === dcur) ? dcur : dflt;
 }
 // 移動平均 (前後 w/2 点)。端は取れる点だけで平均する
 function smooth(ys, w) {
@@ -1352,37 +1400,67 @@ function meanSeries(list) {
   return { xs: grid, ys: grid.map(x => list.reduce((a, s) => a + interp(s.xs, s.ys, x), 0) / list.length) };
 }
 
+// その run が作る LaRe モデルの名前 (元にしたモデル + この章のマップ_台数 学習量)。
+// 例: setting "8x5_2 10M 8x5_3 5M" の 8x5 5agent 5M の章 -> "8x5_2 10M→8x5_3 5M→8x5_5 5M (F1)"
+function lareMadeOf(s, ch) {
+  const base = normSetting(s.setting).replace(/ F\d+$/, "");
+  const toks = (base === "safe" || base === "unsafe") ? [] : base.split(" ");
+  const parts = [];
+  for (let i = 0; i + 1 < toks.length; i += 2) parts.push(toks[i] + " " + toks[i + 1]);
+  parts.push(`${String(ch.map || "").replace(/^map_/, "")}_${ch.agents} ${Number(ch.t_max_m)}M`);
+  return parts.join("→") + ` (${curVer(s)})`;
+}
+// LaRe モデル学習の章 (台数ごと) を、マップ x 学習量 (t_max) ごとの 1 章にまとめる。
+// 学習量が違うと横軸の長さが違うので、別の図にする
+function mergeLareChapters(chs) {
+  const out = [], byMap = {};
+  chs.forEach(ch => {
+    if (ch.collect !== "lare") { out.push(ch); return; }
+    const k = (ch.group || "") + "|" + ch.map + "|" + Number(ch.t_max_m);
+    if (!byMap[k]) {
+      byMap[k] = { plan: ch.plan, group: ch.group, map: ch.map, collect: "lare", merged: true,
+                   label: ch.map + " " + Number(ch.t_max_m) + "M LaRe (merged)", agents: null,
+                   t_max_m: Number(ch.t_max_m) || 0, series: [] };
+      out.push(byMap[k]);
+    }
+    const m = byMap[k];
+    ch.series.forEach(s => m.series.push(Object.assign({}, s, { agents: ch.agents, made: lareMadeOf(s, ch) })));
+  });
+  return out;
+}
+
 function renderCurves() {
   if (!CURVE) return;
   const metric = $("c-metric").value, w = +$("c-smooth").value, avg = $("c-mean").checked;
-  const g = id => $(id).value;
-  const keep = s =>
-    (!g("c-setting") || normSetting(s.setting) === g("c-setting")) &&
-    (!g("c-ver") || curVer(s) === g("c-ver")) &&
-    (!g("c-algo") || s.algo === g("c-algo")) &&
-    (!g("c-assign") || s.task_assign === g("c-assign")) &&
-    (!g("c-reassign") || curRe(s) === g("c-reassign")) &&
-    (!g("c-machine") || s.machine === g("c-machine")) &&
-    (!g("c-state") || s.state === g("c-state"));
-  const chs = CURVE.chapters.filter(ch => ch.plan === g("c-plan")
-    && (!g("c-map") || ch.map === g("c-map")) && (!g("c-n") || String(ch.agents) === g("c-n"))
+  const keep = s => CF_VARY.every(f => !CF_SEL[f.k] || f.get(s) === CF_SEL[f.k]);
+  const chs = CURVE.chapters.filter(ch => ch.plan === $("c-plan").value
+    && (!$("c-map").value || ch.map === $("c-map").value)
+    && (!$("c-n").value || String(ch.agents) === $("c-n").value)
     && ($("c-lare").checked || ch.collect !== "lare"));
   let html = "", nRun = 0, nNo = 0, group = null;
-  chs.forEach((ch, ci) => {
+  const per = $("c-per-agent").checked;
+  const chs2 = $("c-lare").checked && $("c-lare-merge").checked ? mergeLareChapters(chs) : chs;
+  chs2.forEach(ch => {
     let ss = ch.series.filter(keep);
     if (!ss.length) return;
     // 曲線のある run だけ図に出す。無いもの (取得前・旧版のマシン) は数だけ知らせる
     const noCurve = ss.filter(s => !(s.m && s.m[metric]));
     nNo += noCurve.length;
+    // 台数で割る: まとめた章では run ごとの台数 (s.agents)、ふつうの章は章の台数
+    const nag = s => Number(s.agents || ch.agents) || 1;
     ss = ss.filter(s => s.m && s.m[metric]).map(s => Object.assign({}, s, {
-      xs: s.m[metric][0], ys: s.m[metric][1], key: curCond(s) + (avg ? "" : ` / ${s.machine} ${s.seed}`) }));
+      xs: s.m[metric][0],
+      ys: per ? s.m[metric][1].map(v => v == null ? null : v / nag(s)) : s.m[metric][1],
+      key: (ch.merged ? s.made : curCond(s)) + (avg ? "" : ` / ${s.machine} ${s.seed}`) }));
     if (avg) {
       const by = {};
-      ss.forEach(s => (by[curCond(s)] = by[curCond(s)] || []).push(s));
+      const ck = s => ch.merged ? s.made : curCond(s);
+      ss.forEach(s => (by[ck(s)] = by[ck(s)] || []).push(s));
       ss = Object.values(by).map(l => Object.assign({}, l[0], meanSeries(l),
-        { key: curCond(l[0]), n: l.length, state: l.every(s => s.state === "done") ? "done" : "running",
+        { key: ck(l[0]), n: l.length, state: l.every(s => s.state === "done") ? "done" : "running",
           machine: [...new Set(l.map(s => s.machine))].join("/") }));
     }
+    if (!ss.length && !noCurve.length) return;
     nRun += ss.length;
     if (ch.group && ch.group !== group) { group = ch.group; html += `<div class="grouphead">${esc(group)}</div>`; }
     html += curveChapter(ch, ss, noCurve, metric, w);
@@ -1390,19 +1468,21 @@ function renderCurves() {
   if (!html) html = `<div class="mut">この絞り込みで曲線のある run がありません`
     + ` (曲線は収集のたびに取りに行きます。始めたばかりなら次の収集を待ってください)</div>`;
   $("c-body").innerHTML = html;
-  $("c-counts").textContent = `${nRun} 本` + (nNo ? ` (曲線未取得 ${nNo} 本)` : "");
+  $("c-counts").textContent = `${nRun} 本` + (nNo ? ` (曲線未取得 ${nNo} 本)` : "")
+    + (CURVE.collected_at ? `  収集 ${when(CURVE.collected_at)}` : "");
 }
 
 function curveChapter(ch, ss, noCurve, metric, w) {
   const tmax = (ch.t_max_m || 1) * 1e6;
-  const colorBy = $("c-color").value, dashBy = $("c-dash").value;
-  const colorKey = s => colorBy === "setting" ? normSetting(s.setting)
-    : colorBy === "assign" ? s.task_assign : colorBy === "reassign" ? curRe(s)
-    : colorBy === "machine" ? s.machine : s.key;
+  const colorF = cfOf($("c-color").value), dashF = cfOf($("c-dash").value);
+  const colorKey = s => ch.merged ? s.made : (colorF ? colorF.get(s) : s.key);
   const ckeys = [...new Set(ss.map(colorKey))].sort();
   const color = s => CURVE_PALETTE[ckeys.indexOf(colorKey(s)) % CURVE_PALETTE.length];
-  const dash = s => (dashBy === "assign" && s.task_assign === "PPO")
-    || (dashBy === "reassign" && s.reassign) ? "6 4" : "";
+  // 線種: 選んだパラメータの 1 つ目の値 (並べ替えて先頭) を実線、それ以外を破線
+  // (assign は基準の TP を実線にする。reassign は "re F" が先頭に来る)
+  const dvals = dashF ? [...new Set(ss.map(dashF.get))].sort() : [];
+  const dfirst = dvals.includes("TP") ? "TP" : dvals[0];
+  const dash = s => dashF && dashF.get(s) !== dfirst ? "6 4" : "";
   const hid = s => CURVE_HIDDEN.has(ch.label + "|" + s.key);
   ss.sort((a, b) => a.key.localeCompare(b.key));
   ss.forEach(s => { s.sy = smooth(s.ys, w); });
@@ -1419,7 +1499,7 @@ function curveChapter(ch, ss, noCurve, metric, w) {
   for (let i = 0; i <= 4; i++) {
     const v = lo + i / 4 * (hi - lo), y = sy(v);
     g += `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" stroke="var(--line)" stroke-dasharray="2 3"/>`
-       + `<text x="${L - 6}" y="${y + 4}" text-anchor="end" fill="var(--mut)" font-size="10">${num(v, 1)}</text>`;
+       + `<text x="${L - 6}" y="${y + 4}" text-anchor="end" fill="var(--mut)" font-size="10">${num(v, hi - lo < 2 ? 2 : 1)}</text>`;
   }
   for (let i = 0; i <= 5; i++) {
     const x = tmax * i / 5;
@@ -1447,7 +1527,7 @@ function curveChapter(ch, ss, noCurve, metric, w) {
   // 表: t_max の 10 / 25 / 50 / 75 / 100% の時点の値 (前後 3 点の平均。平滑化はかけない)
   const fr = [0.1, 0.25, 0.5, 0.75, 1.0];
   const better = metric === "test_collision_mean" ? -1 : 1;
-  const bestOf = fr.map((f, i) => {
+  const bestOf = fr.map(f => {
     const vs = vis.map(s => valueAt(s.xs, s.ys, f * tmax)).filter(v => v != null);
     return vs.length ? (better > 0 ? Math.max(...vs) : Math.min(...vs)) : null;
   });
@@ -1460,13 +1540,18 @@ function curveChapter(ch, ss, noCurve, metric, w) {
           return `<td class="num${v != null && v === bestOf[i] && vis.length > 1 ? " cbest" : ""}">${v == null ? `<span class="mut">-</span>` : num(v, 1)}</td>`; }).join("")
       + `<td class="num">${lv == null ? "-" : num(lv, 1)} <span class="mut sm">@${num(s.xs[s.xs.length - 1] / 1e6, 1)}M</span></td></tr>`;
   }).join("");
-  const head = `<tr><th>条件</th><th>状態</th>${fr.map(f => `<th class="num">${num(f * ch.t_max_m, 1)}M</th>`).join("")}<th class="num">最新 (最後の 5 点)</th></tr>`;
+  const condHead = (ch.merged ? "作る LaRe モデル (版)"
+    : (CF_VARY.filter(f => f.cond).map(f => f.label).join(" / ") || "setting"))
+    + ($("c-mean").checked ? "" : " / machine seed");
+  const head = `<tr><th>${esc(condHead)}</th><th>状態</th>${fr.map(f => `<th class="num">${num(f * ch.t_max_m, 1)}M</th>`).join("")}<th class="num">最新 (最後の 5 点)</th></tr>`;
 
-  return `<h3><span class="g-map">${esc(ch.map || "")}</span><span class="g-n">${ch.agents} agent</span>`
-    + `<span class="g-t">${ch.t_max_m}M</span></h3>`
-    + `<div class="cchart"><svg viewBox="0 0 ${W} ${H}" width="100%">${g}</svg>`
-    + `<div class="legend">${legend}</div></div>`
-    + `<div class="wrap"><table class="ctbl">${head}${rows}</table></div>`
+  return `<h3><span class="g-map">${esc(ch.map || "")}</span>`
+    + (ch.merged ? `<span class="g-n">LaRe モデル学習 (台数をまとめた図)</span><span class="g-t">${ch.t_max_m}M</span>`
+                 : `<span class="g-n">${ch.agents} agent</span><span class="g-t">${ch.t_max_m}M</span>`)
+    + ($("c-per-agent").checked ? `<span class="mut sm"> 1 台あたり</span>` : "") + `</h3>`
+    + (ss.length ? `<div class="cchart"><svg viewBox="0 0 ${W} ${H}" width="100%">${g}</svg>`
+      + `<div class="legend">${legend}</div></div>`
+      + `<div class="wrap"><table class="ctbl">${head}${rows}</table></div>` : "")
     + (noCurve.length ? `<div class="mut sm">曲線をまだ取れていない run: ${noCurve.map(s =>
         esc(curCond(s) + " / " + s.machine)).join(", ")}</div>` : "");
 }
@@ -1478,16 +1563,37 @@ document.addEventListener("click", ev => {
   if (CURVE_HIDDEN.has(k)) CURVE_HIDDEN.delete(k); else CURVE_HIDDEN.add(k);
   renderCurves();
 });
+// 計画ごとに作り直す絞り込み (c-dyn の中の select) は委譲で受ける
+document.addEventListener("change", ev => {
+  const el = ev.target.closest && ev.target.closest("[data-cf]");
+  if (!el) return;
+  CF_SEL[el.getAttribute("data-cf")] = el.value;
+  renderCurves();
+});
 $("c-plan").addEventListener("change", () => { fillCurveFilters(); renderCurves(); });
-["c-metric", "c-map", "c-n", "c-setting", "c-ver", "c-algo", "c-assign", "c-reassign",
- "c-machine", "c-state", "c-color", "c-dash", "c-smooth", "c-mean", "c-lare"]
+$("c-lare").addEventListener("change", () => { fillCurveFilters(); renderCurves(); });
+$("c-lare-merge").addEventListener("change", () => {
+  if ($("c-lare-merge").checked && !$("c-lare").checked) { $("c-lare").checked = true; fillCurveFilters(); }
+  renderCurves();
+});
+$("c-per-agent").addEventListener("change", renderCurves);
+$("c-color").addEventListener("change", () => { $("c-color").dataset.user = "1"; fillCurveFilters(); renderCurves(); });
+$("c-dash").addEventListener("change", () => { $("c-dash").dataset.user = "1"; });
+["c-metric", "c-map", "c-n", "c-dash", "c-smooth", "c-mean"]
   .forEach(id => $(id).addEventListener("change", renderCurves));
 
 setInterval(() => { if ($("auto").checked) loadTrain(); }, 60000);
 // 学習曲線は収集 (15 分おき) でしか変わらないので、開いているときだけ 5 分おきに取り直す
-setInterval(() => { if ($("auto").checked && tab === "curve") loadCurves(); }, 300000);
+// 学習曲線タブを開いている間は 1 分おきに取り直す (サーバ側の収集は 5 分おき)。
+// 学習中の run の曲線を追えるようにするため
+setInterval(() => { if ($("auto").checked && tab === "curve") loadCurves(); }, 60000);
 
 loadTrain();
-// URL の末尾が #curve / #eval なら、そのタブで開く (ブックマーク用)
-if (location.hash === "#curve") setTab("curve");
+// URL の末尾が #curve / #curve/<計画名> / #eval なら、そのタブで開く (ブックマーク用)
+if (location.hash.startsWith("#curve")) {
+  CURVE_WANT = decodeURIComponent(location.hash.split("/")[1] || "");
+  // #curve/<計画名>/lare で、LaRe モデル学習をマップごとにまとめた図を開く
+  if (location.hash.split("/")[2] === "lare") { $("c-lare").checked = true; $("c-lare-merge").checked = true; }
+  setTab("curve");
+}
 else if (location.hash === "#eval") setTab("eval");
