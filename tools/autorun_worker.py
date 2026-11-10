@@ -192,11 +192,19 @@ LABEL = "com.ldrp.autorun-worker"
 PLIST = os.path.expanduser("~/Library/LaunchAgents/%s.plist" % LABEL)
 
 
-def install(interval):
+def install(interval, calendar=False):
     """launchd に登録する (この Python・このリポジトリのパスで plist を作る).
 
     AbandonProcessGroup: worker が終わっても、起動した学習・評価を launchd に止めさせない
+    calendar: StartInterval (起動からの秒数) の代わりに StartCalendarInterval (毎時 0, 5, 10, ... 分) で
+              起動する。ログイン中に登録した StartInterval のジョブが一度も発火しない Mac (M2 で実測) 向け
     """
+    if calendar:
+        step = max(1, interval // 60)
+        minutes = "".join("<dict><key>Minute</key><integer>%d</integer></dict>" % m for m in range(0, 60, step))
+        timer = "<key>StartCalendarInterval</key>\n  <array>%s</array>" % minutes
+    else:
+        timer = "<key>StartInterval</key><integer>%d</integer>" % interval
     out = os.path.join(HOME_DIR, "worker.log")
     os.makedirs(HOME_DIR, exist_ok=True)
     plist = """<?xml version="1.0" encoding="UTF-8"?>
@@ -207,20 +215,20 @@ def install(interval):
   <key>ProgramArguments</key>
   <array><string>%s</string><string>%s</string></array>
   <key>WorkingDirectory</key><string>%s</string>
-  <key>StartInterval</key><integer>%d</integer>
+  %s
   <key>RunAtLoad</key><true/>
   <key>AbandonProcessGroup</key><true/>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-""" % (LABEL, sys.executable, os.path.abspath(__file__), REPO, interval, out, out)
+""" % (LABEL, sys.executable, os.path.abspath(__file__), REPO, timer, out, out)
     os.makedirs(os.path.dirname(PLIST), exist_ok=True)
     subprocess.run(["launchctl", "unload", PLIST], capture_output=True)
     with open(PLIST, "w") as f:
         f.write(plist)
     subprocess.run(["launchctl", "load", PLIST], check=True)
-    print("installed %s (every %d s). log: %s" % (PLIST, interval, out))
+    print("installed %s (every %d s%s). log: %s" % (PLIST, interval, ", on the clock" if calendar else "", out))
 
 
 def uninstall():
@@ -236,11 +244,14 @@ def main(argv=None):
     p.add_argument("--status-only", action="store_true", help="only write status.json (start nothing)")
     p.add_argument("--install", action="store_true", help="register with launchd (macOS) and exit")
     p.add_argument("--interval", type=int, default=300, help="seconds between runs for --install")
+    p.add_argument("--calendar", action="store_true",
+                   help="for --install: start at fixed minutes of the hour (StartCalendarInterval) "
+                        "instead of StartInterval")
     p.add_argument("--uninstall", action="store_true", help="remove the launchd job and exit")
     args = p.parse_args(argv)
     if args.install:
         settings()                          # 設定が無ければここで止める
-        return install(args.interval) or 0
+        return install(args.interval, args.calendar) or 0
     if args.uninstall:
         return uninstall() or 0
     s = settings()

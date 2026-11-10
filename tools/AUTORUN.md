@@ -137,6 +137,8 @@ tail ~/.ldrp/autorun/worker.log                                           # 動�
 ```
 
 - plist は実行した Python とリポジトリのパスで作られる (ユーザー名・場所が白と違っても動く)
+- **10 分たっても `launchctl list` の runs が 0 のまま**なら、`--install --calendar` で登録し直す (毎時 0, 5, 10, … 分に起動する
+  `StartCalendarInterval` になる)。M2 ではログイン中に登録した `StartInterval` のジョブが一度も発火しなかった (2026-09 と 2026-11 に実測)
 - やめるとき: `python tools/autorun_worker.py --uninstall` (起動済みの学習・評価は止まらない)
 - 学習中は `caffeinate -i` でスリープを防ぐ。ただし蓋を閉じる・電源を切るとジョブもワーカーも止まる
 
