@@ -245,6 +245,7 @@ CR = _load("collect_runs")
 ER = _load("eval_report")
 PLAN = _load("plan")
 LM = _load("lare_models")        # LaRe モデル (.pth) の置き場所を調べる
+AR = _load("autorun")            # 依頼された学習・評価の自動実行 (依頼の追加・取り消しだけここから)
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +556,12 @@ class State(object):
                 r["policy_plan"] = r["uid"] in policy_uids
                 r["plans"] = plans_of.get(r["uid"], [])
             self.attach_global_diff(plan, [d for d in live if d["uid"] in used])
+            # 自動実行 (tools/autorun.py) の依頼で条件を指すための id
+            for c in plan:
+                try:
+                    c["ar_id"] = AR.cond_id(c)
+                except Exception:
+                    pass
             data["plan"] = plan
             data["plan_files"] = self.plan_files()
             data["plan_file"] = ", ".join(data["plan_files"])
@@ -851,6 +858,9 @@ class State(object):
                 except (IOError, OSError) as e:
                     sys.stderr.write("[host] %s\n" % e)
 
+            # 別マシンで回した方策評価のログを logs/ に取ってくる (host に eval_logs: があるときだけ)
+            errors = list(errors) + CR.pull_eval_logs(hosts)
+
             cache = os.path.expanduser(self.args.cache)
             merged = CR.dedupe(CR.read_cache(cache) + runs)
             stale = conf.get("stale_minutes") or 90
@@ -922,6 +932,7 @@ class State(object):
         そこに入っている run の曲線を並べる。条件と run の対応は train() の計画表と同じ."""
         t = self.train()
         cache = load_json(CURVE_CACHE_PATH)
+        evals = self._curve_evals()
         chapters, order = {}, []
         for c in t.get("plan") or []:
             key = (c.get("plan"), c.get("group_order") or 0, c.get("label"))
@@ -953,9 +964,126 @@ class State(object):
                     "algo": c.get("algo"), "task_arrival": c.get("task_arrival"),
                     "task_assign": c.get("task_assign") or "TP",
                     "reassign": c.get("reassign"), "dynamic": c.get("dynamic"),
-                    "m": m})
+                    "m": m, "ev": evals.get(r.get("uid")) or []})
         return {"chapters": [chapters[k] for k in order],
-                "metrics": list(CR.CURVE_KEYS), "collected_at": t.get("collected_at")}
+                "metrics": list(CR.CURVE_KEYS), "collected_at": t.get("collected_at"),
+                "eval_arrivals": self._default_eval_arrivals()}
+
+    @staticmethod
+    def _default_eval_arrivals():
+        """評価表の列の既定 (評価結果がまだ無い章で、空の表の列にする).
+
+        src/config/default.yaml の eval_arrivals を、評価の条件名と同じ書き方
+        (runner.py: bern{p:g} / mmpp / fixed) にして返す
+        """
+        try:
+            import yaml
+            with open(os.path.join(REPO, "src", "config", "default.yaml")) as f:
+                arr = (yaml.safe_load(f) or {}).get("eval_arrivals") or []
+        except Exception:
+            arr = []
+        out = []
+        for a in arr:
+            mode, _, p = str(a).partition(":")
+            if mode == "bernoulli" and p:
+                out.append("bern%g" % float(p))
+            elif mode in ("mmpp", "fixed"):
+                out.append(mode)
+        return out or ["bern0.02", "bern0.05", "bern0.1", "mmpp"]
+
+    # 学習曲線タブの評価表に出す指標 (全部送ると重いので絞る)
+    CURVE_EVAL_METRICS = ("task_completion", "task_completion_per_agent", "collision_rate",
+                          "task_dropped", "goal_account", "deadhead_ratio")
+
+    def _curve_evals(self):
+        """run の uid -> その run の方策を評価した結果のリスト.
+
+        保管リポジトリの manifest.jsonl (uid -> eval_name) と、評価ログ (logs/) の
+        model= (評価用のファイル名) を突き合わせる。1 つのモデルは評価の条件
+        (到着率・実行時の reassign・割当・台数) ごとに何度も評価されるので、条件を
+        分解して返す。画面側で 列 = 到着率、選択欄 = reassign・割当 にする
+        """
+        name_of = {}
+        man = os.path.join(os.path.expanduser(self.args.models_repo), "manifest.jsonl")
+        try:
+            with open(man, "r") as f:
+                for line in f:
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if r.get("uid") and r.get("eval_name"):
+                        name_of[r["uid"]] = r["eval_name"]
+        except (IOError, OSError):
+            return {}
+        try:
+            AG = _load_repo("aggregate")
+            import contextlib
+            import io
+            with contextlib.redirect_stdout(io.StringIO()):
+                runs = AG.load_runs(os.path.join(REPO, "logs"))
+        except Exception as e:                  # 読めなくても曲線は出す
+            sys.stderr.write("[curves] eval: %s: %s\n" % (type(e).__name__, e))
+            return {}
+        by_model = {}
+        for cond, seeds in runs.items():
+            p = ER.parse_condition(cond)
+            if p is None:
+                continue
+            for rec in seeds.values():
+                vals = {}
+                for m in self.CURVE_EVAL_METRICS:
+                    try:
+                        vals[m] = round(float(rec[m]), 3)
+                    except (KeyError, ValueError):
+                        pass
+                by_model.setdefault(rec.get("model"), []).append({
+                    "n": p["n"], "arrival": p["arrival"], "env_reassign": p["env_reassign"],
+                    "allocator": p["allocator"], "planner": p.get("planner"), "vals": vals})
+        # 評価の予約 (tools/eval_lare_factor.py が書く。結果がまだ無い欄に「…」を出すだけ)
+        try:
+            EVL = _load("eval_lare_factor")
+            for rv in EVL.reservations(os.path.join(REPO, "logs")):
+                by_model.setdefault(rv["model"], []).append({
+                    "n": rv["n"], "arrival": rv["arrival"], "env_reassign": rv["env_reassign"],
+                    "allocator": rv["allocator"], "vals": {},
+                    "reserved": {"host": rv["host"], "until": rv["until"]}})
+        except Exception as e:
+            sys.stderr.write("[curves] reservations: %s: %s\n" % (type(e).__name__, e))
+        return {uid: by_model[name] for uid, name in name_of.items() if name in by_model}
+
+    # --- 自動実行の依頼 (tools/autorun.py。投入そのものは autorun.py tick が行う) ---
+    def autorun(self):
+        return AR.summary()
+
+    def autorun_add(self, body):
+        ids = set(body.get("ids") or [])
+        conds = PLAN.parse_plans(self.plan_files())
+        for c in conds:
+            c["id"] = AR.cond_id(c)
+        picked = [c for c in conds if c["id"] in ids]
+        if not picked:
+            return {"ok": False, "error": "condition not found"}
+        machines = [m for m in (body.get("machines") or []) if m]
+        made = AR.add_requests(body.get("kind") or "train", picked, int(body.get("n") or 1),
+                               bool(body.get("then_eval")), machines or None)
+        return {"ok": True, "ids": [r["id"] for r in made]}
+
+    def autorun_cancel(self, body):
+        return {"ok": True, "cancelled": AR.cancel_requests([body.get("id")])}
+
+    def autorun_pause(self, body):
+        AR.set_pause(bool(body.get("on")))
+        return {"ok": True}
+
+    def autorun_tick(self):
+        """「今すぐ投入」: autorun.py tick を別プロセスで 1 回動かす (ssh があるので画面は待たない)."""
+        log = os.path.join(TOOLS, ".autorun", "tick.log")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(log, "a") as f:
+            subprocess.Popen([sys.executable, os.path.join(TOOLS, "autorun.py"), "tick"],
+                             cwd=REPO, stdout=f, stderr=subprocess.STDOUT)
+        return {"ok": True}
 
     def status(self):
         with self.lock:
@@ -1048,6 +1176,11 @@ def make_routes(state):
         ("POST", "/api/note"): lambda body: state.note(body),
         ("POST", "/api/dismiss_diff"): lambda body: state.dismiss_diff(body),
         ("POST", "/api/exclude"): lambda body: state.exclude(body),
+        ("GET", "/api/autorun"): lambda body: state.autorun(),
+        ("POST", "/api/autorun/add"): lambda body: state.autorun_add(body),
+        ("POST", "/api/autorun/cancel"): lambda body: state.autorun_cancel(body),
+        ("POST", "/api/autorun/pause"): lambda body: state.autorun_pause(body),
+        ("POST", "/api/autorun/tick"): lambda body: state.autorun_tick(),
     }
 
 

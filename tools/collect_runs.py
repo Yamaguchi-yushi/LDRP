@@ -1349,11 +1349,27 @@ def pretty_lare_models(name):
     if not name:
         return ""
     parts = []
+    last = None
     for m in LARE_SEG_RE.finditer(str(name)):
         steps = float(m.group(3))
         parts.append("%s_%s %gM" % (m.group(1), m.group(2), steps))
+        last = m
+    if not parts:
+        return str(name)
     # 元の管理表の表記に合わせて矢印で繋ぐ (例: "8x5_2 10M→aoba00_2 5M")
-    return "→".join(parts) if parts else str(name)
+    out = "→".join(parts)
+    # 手で編集したモデルの印 (例: ..._checkpoint_waitedit.pth -> "8x5_5 10M waitedit")。
+    # 付けないと元のモデルの run と同じ setting・同じ評価用モデル名になる
+    mark = lare_edit_mark(str(name)[last.end():])
+    return "%s %s" % (out, mark) if mark else out
+
+
+def lare_edit_mark(tail):
+    """LaRe のファイル名の最後の段より後ろ ("_checkpoint_waitedit.pth" など) から、
+    編集の印 ("waitedit") を取り出す。印が無ければ ""."""
+    t = re.sub(r"\.pth$", "", str(tail or ""))
+    t = re.sub(r"^_(?:checkpoint|final)", "", t)
+    return t.strip("_ ")
 
 
 def parse_steps(v):
@@ -1955,6 +1971,56 @@ def collect_ssh(host, tail_bytes, timeout, verbose=False, only_dirs=None,
     for sub in host.get("model_subdirs") or []:
         remote_args += ["--model-subdir", sub]
     return _collect_ssh_run(host, py, remote_args, timeout, verbose, multiplex)
+
+
+def pull_eval_logs(hosts, repo=None, timeout=120, verbose=False):
+    """別マシンで回した方策評価のログ (*.txt) を手元の logs/ に取ってくる.
+
+    collect_config.yaml の host に `eval_logs: ~/LDRP_eval/logs` のように書いたものだけが対象。
+    ダッシュボードは手元の logs/ の [RESULT] 行しか読まないので、取ってくれば評価表に出る。
+    何か新しく届いたときだけ aggregate.py --csv で results/summary.csv を作り直す。
+    返り値: [(host label, エラー文)]
+    """
+    repo = repo or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    errors, changed = [], False
+    for h in hosts:
+        src = h.get("eval_logs")
+        if not src or h.get("ssh") in (None, "", "local"):
+            continue
+        rel = src[2:] if src.startswith("~/") else src       # rsync のリモート側は ~ を展開しない
+        ssh = ["ssh", "-o", "BatchMode=yes"]
+        for opt in h.get("ssh_options") or []:
+            ssh += ["-o", opt]
+        ssh += ["-o", "ConnectTimeout=%d" % int(h.get("connect_timeout", 8))]
+        if h.get("port"):
+            ssh += ["-p", str(h["port"])]
+        cmd = ["rsync", "-az", "--itemize-changes", "-e", " ".join(ssh),
+               "--include", "*/", "--include", "*.txt", "--exclude", "*",
+               "%s:%s/" % (h["ssh"], rel.rstrip("/")), os.path.join(repo, "logs") + "/"]
+        if verbose:
+            sys.stderr.write("  $ %s\n" % " ".join(cmd))
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            errors.append((h.get("label"), "eval log pull: %s" % e))
+            continue
+        if p.returncode == 23 and "No such file or directory" in p.stderr:
+            continue                        # まだ一度も評価を回していないマシン
+        if p.returncode != 0:
+            errors.append((h.get("label"), "eval log pull: rsync rc=%d %s"
+                           % (p.returncode, p.stderr.strip()[-200:])))
+            continue
+        # 届いたファイルは "<f+++" / ">f.st" のように f で始まる行になる
+        got = [l for l in p.stdout.splitlines() if l[1:2] == "f"]
+        if got:
+            changed = True
+            sys.stderr.write("[eval-logs] %s: %d file(s) updated\n" % (h.get("label"), len(got)))
+    if changed:
+        subprocess.run([sys.executable, os.path.join(repo, "aggregate.py"),
+                        "--root", os.path.join(repo, "logs"),
+                        "--csv", os.path.join(repo, "results", "summary.csv")],
+                       cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return errors
 
 
 def _collect_ssh_run(host, py, remote_args, timeout, verbose, multiplex):
@@ -5446,6 +5512,10 @@ def main(argv=None):
         p.error("no hosts to visit")
 
     drop_root = args.drop_root or conf.get("drop_root")
+
+    # 別マシンで回した方策評価のログを logs/ に取ってくる (host に eval_logs: があるときだけ)
+    for label, err in pull_eval_logs(hosts, verbose=args.verbose):
+        sys.stderr.write("[eval-logs] %s: %s\n" % (label, err))
 
     # 学習曲線の仕様。--curve-spec (make_graph が書く) が優先、無ければ config
     spec = {}

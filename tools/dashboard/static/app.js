@@ -108,6 +108,7 @@ async function loadTrain() {
   FV_IDS.forEach(id => fillSelect($(id), fvOptions(id)));
   renderStamp();
   renderTrain();
+  loadAutorun();
 }
 // t-plan はここに入っていなかったため、計画を選んでも 60 秒後の自動更新まで
 // 表が変わらなかった。絞り込みは全部同じ扱いにする
@@ -492,7 +493,8 @@ function renderTrain() {
         odd ? ` <span class="wrn">⚠要再実行 ${odd}</span>` : ""}${
         tmax ? ` <span class="wrn">⚠t_max</span>` : ""}${
         hidden ? ` <span class="mut">(失敗・除外 ${hidden} 件を非表示)</span>` : ""}${
-        diffBtn}${gBtn}</td></tr>`;
+        diffBtn}${gBtn}${c.ar_id ? ` <button type="button" class="arbtn" data-ar="${esc(c.ar_id)}"`
+          + ` title="この条件の学習・評価を自動実行に頼む">依頼</button>` : ""}</td></tr>`;
 
     // 全体との差の中身。キーごとに「この条件 / 他」を並べ、問題なければ消せる
     if (G.length) {
@@ -1284,6 +1286,47 @@ let CURVE_WANT = "";                     // URL の #curve/<計画名> で開く
 const CURVE_HIDDEN = new Set();          // 凡例で消した線 (章ラベル|系列キー)
 const CURVE_PALETTE = ["#0969da", "#cf222e", "#1a7f37", "#8250df", "#bc4c00", "#0f6b6b",
                        "#9a6700", "#e85aad", "#57606a", "#2da44e", "#6639ba", "#fb8f44"];
+// 「アルゴリズム × setting」の色: アルゴリズムで色相 (図をまたいで固定)、setting で同じ色相の濃淡。
+// 濃淡の順は 標準 → 明るい → 暗い → 中間 (safe = LaRe なしを標準の色にする)
+const ALGO_FAMILIES = [
+  ["#0969da", "#7cc0ff", "#06306b", "#3b8eea"],   // 青
+  ["#cf222e", "#ff9492", "#82071e", "#e5534b"],   // 赤
+  ["#1a7f37", "#6fdd8b", "#0b4a1f", "#2da44e"],   // 緑
+  ["#8250df", "#c297ff", "#3e1f79", "#a371f7"],   // 紫
+  ["#bc4c00", "#ffb070", "#762c00", "#e16f24"],   // 橙
+  ["#0f6b6b", "#5fd3d3", "#073e3e", "#1b9999"],   // 青緑
+];
+const ALGO_FAMILY_OF = { QMIX: 0, MAPPO: 1, MAT: 2, MAT_DEC: 3, QPLEX: 4, IQL: 5, VDN: 5, TRANSF_QMIX: 4, HAPPO: 3 };
+// 16 進の色 <-> HSL。濃淡を必要な段数だけ作るのに使う
+function hexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16), r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  if (!d) return [0, 0, l];
+  const sat = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+  const h = mx === r ? ((g - b) / d + (g < b ? 6 : 0)) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h * 60, sat, l];
+}
+function hslToHex(h, sat, l) {
+  const f = k => { const a = sat * Math.min(l, 1 - l), t = (k + h / 30) % 12;
+                   return Math.round(255 * (l - a * Math.max(-1, Math.min(t - 3, 9 - t, 1)))); };
+  return "#" + [f(0), f(8), f(4)].map(v => v.toString(16).padStart(2, "0")).join("");
+}
+// 基準の色から n 段の濃淡 (標準 → 明るい → 暗い → もっと明るい → …)。4 段までは手で選んだ表を使う
+function shadesOf(family, n) {
+  if (n <= family.length) return family;
+  const [h, sat, l] = hexToHsl(family[0]), out = [family[0]];
+  for (let k = 1; out.length < n; k++) {
+    const step = Math.ceil(k / 2) * Math.min(0.12, 0.5 / n);
+    out.push(hslToHex(h, sat, Math.max(0.15, Math.min(0.85, l + (k % 2 ? step : -step)))));
+  }
+  return out;
+}
+// 見分けやすい色を n 色。12 色までは CURVE_PALETTE、それより多ければ色相を黄金角でずらして作る
+function categorical(i, n) {
+  if (n <= CURVE_PALETTE.length) return CURVE_PALETTE[i];
+  return hslToHex((i * 137.508) % 360, 0.65, i % 2 ? 0.55 : 0.4);
+}
+const settingOrder = (a, b) => (a === "safe" ? -1 : b === "safe" ? 1 : a.localeCompare(b, undefined, { numeric: true }));
 const METRIC_LABEL = {
   test_task_completion_mean: "配送数 (test_task_completion_mean)",
   test_goal_mean: "ゴール数 (test_goal_mean)",
@@ -1352,16 +1395,23 @@ function fillCurveFilters() {
   // 色・線種に選べるのも、割れているパラメータだけ
   const opts = CF_VARY.filter(f => f.k !== "state");
   const col = $("c-color"), ccur = col.value;
-  col.innerHTML = opts.map(f => `<option value="${f.k}">${esc(f.label)}</option>`).join("")
+  const both = opts.some(f => f.k === "algo") && opts.some(f => f.k === "setting");
+  col.innerHTML = `<option value="auto">おまかせ</option>`
+    + (both ? `<option value="algo_setting">algo (色) × setting (濃淡)</option>` : "")
+    + opts.map(f => `<option value="${f.k}">${esc(f.label)}</option>`).join("")
     + `<option value="cond">条件ごと</option>`;
-  // 既定の色: setting が割れていれば setting、無ければ割れている最初の「条件の軸」(arrival など)
+  // 既定の色: algo か setting が割れていれば「おまかせ」(章ごとに、アルゴリズムが複数なら algo で色相・
+  // setting で濃淡、1 つなら LaRe の経路ごとに別の色・版で濃淡)。それ以外は割れている最初の「条件の軸」
   const firstCond = opts.find(f => f.cond);
   col.value = col.dataset.user && [...col.options].some(o => o.value === ccur) ? ccur
-    : (opts.some(f => f.k === "setting") ? "setting" : (firstCond ? firstCond.k : "cond"));
+    : (opts.some(f => f.k === "algo" || f.k === "setting") ? "auto"
+       : (firstCond ? firstCond.k : "cond"));
   // 既定の線種: 色に使っていない assign > reassign。自分で選んだら (data-user) それを残す
   const dsh = $("c-dash"), dcur = dsh.value;
   dsh.innerHTML = `<option value="">なし</option>`
-    + opts.filter(f => f.k !== col.value).map(f => `<option value="${f.k}">${esc(f.label)}</option>`).join("");
+    + opts.filter(f => f.k !== col.value
+                       && !(["auto", "algo_setting"].includes(col.value) && ["algo", "setting", "ver"].includes(f.k)))
+          .map(f => `<option value="${f.k}">${esc(f.label)}</option>`).join("");
   const dflt = ["assign", "reassign"].find(k => k !== col.value && opts.some(f => f.k === k)) || "";
   dsh.value = dsh.dataset.user && [...dsh.options].some(o => o.value === dcur) ? dcur : dflt;
 }
@@ -1397,7 +1447,16 @@ function meanSeries(list) {
                         return ys[k - 1] + t * (ys[k] - ys[k - 1]); }
     return ys[ys.length - 1];
   };
-  return { xs: grid, ys: grid.map(x => list.reduce((a, s) => a + interp(s.xs, s.ys, x), 0) / list.length) };
+  // 平均に加えて seed の範囲 (最小・最大) と標本標準偏差も持つ (図の帯に使う)
+  const ys = [], mn = [], mx = [], sd = [];
+  grid.forEach(x => {
+    const v = list.map(s => interp(s.xs, s.ys, x)).filter(y => y != null && !isNaN(y));
+    if (!v.length) { ys.push(null); mn.push(null); mx.push(null); sd.push(null); return; }
+    const m = v.reduce((a, b) => a + b, 0) / v.length;
+    ys.push(m); mn.push(Math.min(...v)); mx.push(Math.max(...v));
+    sd.push(v.length > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - m) ** 2, 0) / (v.length - 1)) : 0);
+  });
+  return { xs: grid, ys, ymin: mn, ymax: mx, ysd: sd };
 }
 
 // その run が作る LaRe モデルの名前 (元にしたモデル + この章のマップ_台数 学習量)。
@@ -1443,6 +1502,7 @@ function renderCurves() {
   chs2.forEach(ch => {
     let ss = ch.series.filter(keep);
     if (!ss.length) return;
+    const runs = ss.slice();                  // 評価表用 (曲線の無い run も、平均でまとめる前の run も入れる)
     // 曲線のある run だけ図に出す。無いもの (取得前・旧版のマシン) は数だけ知らせる
     const noCurve = ss.filter(s => !(s.m && s.m[metric]));
     nNo += noCurve.length;
@@ -1458,12 +1518,14 @@ function renderCurves() {
       ss.forEach(s => (by[ck(s)] = by[ck(s)] || []).push(s));
       ss = Object.values(by).map(l => Object.assign({}, l[0], meanSeries(l),
         { key: ck(l[0]), n: l.length, state: l.every(s => s.state === "done") ? "done" : "running",
-          machine: [...new Set(l.map(s => s.machine))].join("/") }));
+          machine: [...new Set(l.map(s => s.machine))].join("/"),
+          // 表の学習の列を seed ごとの値から 平均 ± 標準偏差 にするため、元の run を持っておく
+          members: l, seeds: l.map(s => s.seed) }));
     }
     if (!ss.length && !noCurve.length) return;
     nRun += ss.length;
     if (ch.group && ch.group !== group) { group = ch.group; html += `<div class="grouphead">${esc(group)}</div>`; }
-    html += curveChapter(ch, ss, noCurve, metric, w);
+    html += curveChapter(ch, ss, noCurve, metric, w, runs);
   });
   if (!html) html = `<div class="mut">この絞り込みで曲線のある run がありません`
     + ` (曲線は収集のたびに取りに行きます。始めたばかりなら次の収集を待ってください)</div>`;
@@ -1472,12 +1534,71 @@ function renderCurves() {
     + (CURVE.collected_at ? `  収集 ${when(CURVE.collected_at)}` : "");
 }
 
-function curveChapter(ch, ss, noCurve, metric, w) {
+// ── 学習曲線の章に付ける評価表 ──
+// 行 = 凡例と同じ条件 (seed はまとめて 平均 ± sd)、列 = 評価時の到着率。
+// 評価時の reassign・割当は表の上の選択欄で 1 つに絞る (列に並べると読めなくなるため)
+const EVAL_LOWER = new Set(["collision_rate", "task_dropped", "deadhead_ratio"]);
+const arrOrder = a => a === "fixed" ? -1 : a === "mmpp" ? 99 : (parseFloat(String(a).replace("bern", "")) || 50);
+// run 1 本の評価結果から、選択欄に合うものを 到着率 -> 値 で取り出す
+// 返り値: 実行時 reassign ("off" / "on") -> 到着率 -> その評価の全指標 ({task_completion: …})
+function runEvalVals(s, nag) {
+  const al = $("c-ealloc").value;
+  const want = al || String(s.task_assign || "TP").toLowerCase();   // 既定は学習時と同じ割当
+  const out = { off: {}, on: {}, rsv: { off: {}, on: {} } };
+  (s.ev || []).forEach(e => {
+    if (e.n !== nag || e.allocator !== want) return;
+    const side = e.env_reassign ? "on" : "off";
+    if (e.reserved) {                       // 予約 (まだ結果の無い条件を評価中)
+      if (!(e.arrival in out.rsv[side])) out.rsv[side][e.arrival] = e.reserved;
+      return;
+    }
+    const o = out[side];
+    if (!(e.arrival in o)) o[e.arrival] = e.vals;
+  });
+  return out;
+}
+// 評価表のかたまり = チェックした指標 x チェックした実行時 reassign (選択欄の並び順)
+const evMetrics = () => [...document.querySelectorAll("input.c-em:checked")].map(x => x.value);
+const evReassigns = () => [...document.querySelectorAll("input.c-er:checked")].map(x => x.value);
+const evBlocks = () => evMetrics().flatMap(m => evReassigns().map(re => ({ m, re })));
+// 平均 ± sd (標本標準偏差)。値が 1 つなら sd は出さない
+function evStat(xs) {
+  if (!xs.length) return null;
+  const m = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const sd = xs.length > 1 ? Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / (xs.length - 1)) : null;
+  return { m, sd, n: xs.length, xs };
+}
+
+function curveChapter(ch, ss, noCurve, metric, w, runs) {
   const tmax = (ch.t_max_m || 1) * 1e6;
   const colorF = cfOf($("c-color").value), dashF = cfOf($("c-dash").value);
   const colorKey = s => ch.merged ? s.made : (colorF ? colorF.get(s) : s.key);
   const ckeys = [...new Set(ss.map(colorKey))].sort();
-  const color = s => CURVE_PALETTE[ckeys.indexOf(colorKey(s)) % CURVE_PALETTE.length];
+  let color = s => CURVE_PALETTE[ckeys.indexOf(colorKey(s)) % CURVE_PALETTE.length];
+  const cmode = $("c-color").value;
+  if ((cmode === "auto" || cmode === "algo_setting") && !ch.merged) {
+    // おまかせ: 章の中身で決める
+    //   アルゴリズムが複数 -> アルゴリズムで色相 (図をまたいで固定)、setting で濃淡
+    //   アルゴリズムが 1 つ -> LaRe の経路 (setting から版を除いたもの) ごとに別の色、版 (F1/F2/F3) で濃淡
+    const fa = cfOf("algo"), fs = cfOf("setting");
+    const algos = [...new Set(ss.map(fa.get))];
+    const multiAlgo = algos.length > 1 || cmode === "algo_setting";
+    const chain = s => normSetting(s.setting).replace(/ F\d+$/, "") || "-";
+    const hueKey = multiAlgo ? fa.get : chain;
+    const shadeKey = multiAlgo ? fs.get : curVer;
+    const hues = [...new Set(ss.map(hueKey))].sort(settingOrder);
+    const sub = {};
+    ss.forEach(s => (sub[hueKey(s)] = sub[hueKey(s)] || new Set()).add(shadeKey(s)));
+    const base = h => multiAlgo
+      ? ALGO_FAMILIES[(h in ALGO_FAMILY_OF ? ALGO_FAMILY_OF[h]
+                       : Object.keys(ALGO_FAMILY_OF).length + hues.indexOf(h)) % ALGO_FAMILIES.length]
+      : [categorical(hues.indexOf(h), hues.length)];
+    color = s => {
+      const h = hueKey(s), l = [...sub[h]].sort(settingOrder);
+      const f = shadesOf(base(h), l.length);
+      return f[l.indexOf(shadeKey(s)) % f.length];
+    };
+  }
   // 線種: 選んだパラメータの 1 つ目の値 (並べ替えて先頭) を実線、それ以外を破線
   // (assign は基準の TP を実線にする。reassign は "re F" が先頭に来る)
   const dvals = dashF ? [...new Set(ss.map(dashF.get))].sort() : [];
@@ -1486,10 +1607,23 @@ function curveChapter(ch, ss, noCurve, metric, w) {
   const hid = s => CURVE_HIDDEN.has(ch.label + "|" + s.key);
   ss.sort((a, b) => a.key.localeCompare(b.key));
   ss.forEach(s => { s.sy = smooth(s.ys, w); });
+  // 同じ条件の seed が 2 本以上あるときの帯 (最小〜最大 / 平均 ± 標準偏差)。平均の線と同じ平滑化をかける
+  const band = $("c-band").value;
+  ss.forEach(s => {
+    s.blo = s.bhi = null;
+    if (!band || !(s.n > 1) || !s.ymin) return;
+    if (band === "sd") {
+      s.blo = smooth(s.ys.map((m, i) => m == null ? null : m - s.ysd[i]), w);
+      s.bhi = smooth(s.ys.map((m, i) => m == null ? null : m + s.ysd[i]), w);
+    } else {
+      s.blo = smooth(s.ymin, w);
+      s.bhi = smooth(s.ymax, w);
+    }
+  });
 
   const W = 820, H = 320, L = 52, R = 16, T = 12, B = 32;
   const vis = ss.filter(s => !hid(s));
-  const vals = vis.flatMap(s => s.sy.filter(v => v != null));
+  const vals = vis.flatMap(s => [...s.sy, ...(s.blo || []), ...(s.bhi || [])].filter(v => v != null));
   let lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 1;
   if (lo === hi) { lo -= 1; hi += 1; }
   const pad = (hi - lo) * 0.05; lo -= pad; hi += pad;
@@ -1506,6 +1640,19 @@ function curveChapter(ch, ss, noCurve, metric, w) {
     g += `<text x="${sx(x)}" y="${H - B + 16}" text-anchor="middle" fill="var(--mut)" font-size="10">${num(x / 1e6, 1)}M</text>`;
   }
   vis.forEach(s => {
+    if (!s.blo) return;
+    const up = [], dn = [];
+    s.xs.forEach((x, i) => {
+      if (s.blo[i] == null || s.bhi[i] == null) return;
+      const X = sx(Math.min(x, tmax)).toFixed(1);
+      up.push(`${X},${sy(s.bhi[i]).toFixed(1)}`);
+      dn.push(`${X},${sy(s.blo[i]).toFixed(1)}`);
+    });
+    if (up.length > 1)
+      g += `<polygon fill="${color(s)}" fill-opacity="0.15" stroke="none" points="${up.concat(dn.reverse()).join(" ")}">`
+         + `<title>${esc(s.key)}: ${s.n} seed の${band === "sd" ? "平均 ± 標準偏差" : "範囲 (最小〜最大)"}</title></polygon>`;
+  });
+  vis.forEach(s => {
     const pts = s.xs.map((x, i) => s.sy[i] == null ? null : `${sx(Math.min(x, tmax)).toFixed(1)},${sy(s.sy[i]).toFixed(1)}`)
       .filter(Boolean).join(" ");
     g += `<polyline fill="none" stroke="${color(s)}" stroke-width="1.6" stroke-dasharray="${dash(s)}"`
@@ -1521,37 +1668,110 @@ function curveChapter(ch, ss, noCurve, metric, w) {
     const k = ch.label + "|" + s.key;
     return `<span class="cleg${hid(s) ? " off" : ""}" data-ckey="${esc(k)}">`
       + `<svg width="22" height="8"><line x1="0" y1="4" x2="22" y2="4" stroke="${color(s)}" stroke-width="2"`
-      + ` stroke-dasharray="${dash(s)}"/></svg>${esc(s.key)}${s.n > 1 ? ` (${s.n} run)` : ""}</span>`;
+      + ` stroke-dasharray="${dash(s)}"/></svg>${esc(s.key)}${
+        // 条件でまとめたときは seed を並べる (どの run の平均かが分かるように)
+        s.seeds ? ` <span class="mut sm">(${s.seeds.length > 1 ? s.seeds.length + " seed: " : "seed "}${
+          esc(s.seeds.join(", "))})</span>` : ""}</span>`;
   }).join("");
 
   // 表: t_max の 10 / 25 / 50 / 75 / 100% の時点の値 (前後 3 点の平均。平滑化はかけない)
   const fr = [0.1, 0.25, 0.5, 0.75, 1.0];
   const better = metric === "test_collision_mean" ? -1 : 1;
+  // 学習の列の値: 条件でまとめた行は seed ごとの値の 平均 ± 標準偏差 (評価の列と同じ evStat)。
+  // 平均の曲線から読むと、一番短い seed の位置で切れて 100% の値が出ないため
+  const tstat = (s, f) => s.members
+    ? evStat(s.members.map(m => valueAt(m.xs, m.ys, f * tmax)).filter(v => v != null))
+    : (v => v == null ? null : { m: v, sd: null, n: 1, xs: [v] })(valueAt(s.xs, s.ys, f * tmax));
   const bestOf = fr.map(f => {
-    const vs = vis.map(s => valueAt(s.xs, s.ys, f * tmax)).filter(v => v != null);
+    const vs = vis.map(s => (tstat(s, f) || {}).m).filter(v => v != null);
     return vs.length ? (better > 0 ? Math.max(...vs) : Math.min(...vs)) : null;
   });
-  const rows = ss.map(s => {
-    const last = s.ys.slice(-5).filter(v => v != null);
-    const lv = last.length ? last.reduce((a, b) => a + b, 0) / last.length : null;
-    return `<tr${hid(s) ? ` class="mut"` : ""}><td><i class="dot" style="background:${color(s)}"></i>${esc(s.key)}</td>`
-      + `<td>${s.state === "done" ? `<span class="c-ok">done</span>` : `${Math.round((s.progress || 0) * 100)}%`}</td>`
-      + fr.map((f, i) => { const v = valueAt(s.xs, s.ys, f * tmax);
-          return `<td class="num${v != null && v === bestOf[i] && vis.length > 1 ? " cbest" : ""}">${v == null ? `<span class="mut">-</span>` : num(v, 1)}</td>`; }).join("")
-      + `<td class="num">${lv == null ? "-" : num(lv, 1)} <span class="mut sm">@${num(s.xs[s.xs.length - 1] / 1e6, 1)}M</span></td></tr>`;
+  // 表は 1 つ: 行 = 図の線 (「条件で平均」なら条件、外せば run)、列 = 学習 (t_max の各時点) | 評価 (到着率)
+  const ckey = s => ch.merged ? s.made : curCond(s);
+  const avg = $("c-mean").checked;
+  const evOn = $("c-evshow").checked;
+  const nagOf = s => Number(s.agents || ch.agents);
+  // 行ごとの評価: 平均なら同じ条件の run (曲線の無い run も含む) を seed として平均 ± sd、run の行ならその run の値
+  const evRuns = s => avg ? (runs || []).filter(r => ckey(r) === ckey(s)) : [s];
+  const evVals = ss.map(s => evRuns(s).map(r => runEvalVals(r, nagOf(r))));
+  let ecols = [...new Set(evVals.flatMap(l => l.flatMap(v => [...Object.keys(v.off), ...Object.keys(v.on),
+                                                                ...Object.keys(v.rsv.off), ...Object.keys(v.rsv.on)])))]
+    .sort((a, b) => arrOrder(a) - arrOrder(b));
+  // 評価結果がまだ無い章は、既定の評価条件 (default.yaml の eval_arrivals) を列にした空の欄にする
+  const evEmpty = !ecols.length;
+  if (evEmpty) ecols = (CURVE.eval_arrivals || []).slice().sort((a, b) => arrOrder(a) - arrOrder(b));
+  // かたまり (指標 x 実行時 reassign) ごとに到着率の列を作り、かたまりの間を縦線で区切る
+  const blocks = evOn ? evBlocks() : [];
+  // estats[行][かたまり][到着率]
+  // 予約: 結果の無い欄に「…」を出す (行の run のどれかが予約されていれば)
+  const eres = evVals.map(l => blocks.map(b => ecols.map(c => l.map(v => v.rsv[b.re][c]).find(Boolean) || null)));
+  const estats = evVals.map(l => blocks.map(b => ecols.map(c =>
+    evStat(l.map(v => v[b.re][c] && v[b.re][c][b.m]).filter(v => v != null)))));
+  const ebest = blocks.map((b, k) => ecols.map((_c, i) => {
+    const ms = estats.filter((_r, j) => !hid(ss[j])).map(r => r[k][i] && r[k][i].m).filter(v => v != null);
+    return ms.length > 1 ? (EVAL_LOWER.has(b.m) ? Math.min(...ms) : Math.max(...ms)) : null;
+  }));
+  // 小数の桁はかたまりごと (1 未満の値しかない指標は 3 桁)
+  const end = blocks.map((_b, k) => {
+    const ms = estats.flatMap(r => r[k]).filter(Boolean).map(c => Math.abs(c.m));
+    return ms.length && Math.max(...ms) < 1 ? 3 : ms.some(v => v < 10) ? 2 : 1;
+  });
+  // 表示する列の並び: 指標 > 到着率 > 実行時 reassign (bern0.1 の下に off / on)。gap = 区切り線の太さ
+  const ems = evOn ? evMetrics() : [], ers = evOn ? evReassigns() : [];
+  const ecolSeq = ems.flatMap(m => ecols.flatMap((_c, i) => ers.map((re, r) => ({
+    k: blocks.findIndex(b => b.m === m && b.re === re), i,
+    gap: i === 0 && r === 0 ? " egap" : r === 0 ? " agap" : "" }))));
+  const rsvTitle = rv => `評価中: ${rv.host || "?"} (${new Date(rv.until * 1000).toLocaleString("ja-JP",
+    { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} ごろまで)`;
+  const evCell = (c, k, i, nrun, gap, rv) => !c
+    ? (rv ? `<td class="num mut${gap}" title="${esc(rsvTitle(rv))}">…</td>` : `<td class="num mut${gap}">-</td>`)
+    : `<td class="num${gap}${c.m === ebest[k][i] ? " cbest" : ""}" title="${esc(c.xs.map(x => num(x, end[k])).join(", "))}">`
+      + `${num(c.m, end[k])}${c.sd != null ? `<span class="mut sm"> ±${num(c.sd, end[k])}</span>` : ""}`
+      + (c.n < nrun ? `<span class="mut sm"> (${c.n})</span>` : "") + `</td>`;
+
+  const rows = ss.map((s, j) => {
+    // 状態は左端に短く: 完了 = ✓、学習中 = 進み具合 (%)
+    return `<tr${hid(s) ? ` class="mut"` : ""}>`
+      + `<td class="cst">${s.state === "done" ? `<span class="c-ok" title="done">✓</span>` : `<span title="${esc(s.state)}">${Math.round((s.progress || 0) * 100)}%</span>`}</td>`
+      + `<td><i class="dot" style="background:${color(s)}"></i>${esc(s.key)}</td>`
+      + fr.map((f, i) => { const c = tstat(s, f), v = c ? c.m : null;
+          return `<td class="num${i === 0 ? " egap" : ""}${v != null && v === bestOf[i] && vis.length > 1 ? " cbest" : ""}"`
+            + `${c && c.xs.length > 1 ? ` title="${esc(c.xs.map(x => num(x, 1)).join(", "))}"` : ""}>`
+            + (v == null ? `<span class="mut">-</span>`
+               : num(v, 1) + (c.sd != null ? `<span class="mut sm"> ±${num(c.sd, 1)}</span>` : "")
+                 + (s.members && c.n < s.members.length ? `<span class="mut sm"> (${c.n})</span>` : ""))
+            + `</td>`; }).join("")
+      + ecolSeq.map(o => evCell(estats[j][o.k][o.i], o.k, o.i, evRuns(s).length, o.gap, eres[j][o.k][o.i])).join("") + `</tr>`;
   }).join("");
   const condHead = (ch.merged ? "作る LaRe モデル (版)"
     : (CF_VARY.filter(f => f.cond).map(f => f.label).join(" / ") || "setting"))
-    + ($("c-mean").checked ? "" : " / machine seed");
-  const head = `<tr><th>${esc(condHead)}</th><th>状態</th>${fr.map(f => `<th class="num">${num(f * ch.t_max_m, 1)}M</th>`).join("")}<th class="num">最新 (最後の 5 点)</th></tr>`;
+    + (avg ? "" : " / machine seed");
+  const mlabel = METRIC_LABEL[metric] || metric;
+  // 見出しは 3 段 (評価の指標 / 到着率 / 実行時 reassign)。評価が無ければ 2 段
+  const ev3 = ecolSeq.length > 0, hr = ev3 ? 3 : 2;
+  const head = `<tr><th rowspan="${hr}" class="cst">状態</th><th rowspan="${hr}">${esc(condHead)}</th>`
+    + `<th class="grp egap" colspan="${fr.length}">学習: ${esc(mlabel)} <span class="mut sm">(test 平均${avg ? "。seed の平均 ± 標準偏差" : ""})</span></th>`
+    + ems.map(m => `<th class="grp egap" colspan="${ecols.length * ers.length}">評価: ${esc(m)}${EVAL_LOWER.has(m) ? ` <span class="mut sm">低いほど良い</span>` : ""}</th>`).join("")
+    + `</tr><tr>${fr.map((f, i) => `<th rowspan="${hr - 1}" class="num${i === 0 ? " egap" : ""}">${num(f * ch.t_max_m, 1)}M</th>`).join("")}`
+    + ems.map(() => ecols.map((c, i) => `<th class="grp${i === 0 ? " egap" : " agap"}" colspan="${ers.length}">${esc(c)}</th>`).join("")).join("")
+    + (ev3 ? `</tr><tr>` + ecolSeq.map(o => `<th class="num mut sm${o.gap}" title="実行時 reassign">re ${esc(blocks[o.k].re)}</th>`).join("") : "")
+    + `</tr>`;
+  const note = evOn ? `<div class="mut sm">評価 (平均 ± sd) の条件: 割当 ${esc($("c-ealloc").value || "学習と同じ")}`
+    + (avg ? "・seed = 同じ条件の run" : "") + "。セルにマウスを乗せると seed ごとの値"
+    + (evEmpty ? ` <span class="wrn">評価結果なし (評価前、または保管リポジトリに無い run)</span>` : "") + `</div>` : "";
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}" width="100%">${g}</svg>`;
+  // 凡例は図の右。1 項目 1 行 (折り返さない) で縦に並べ、LEG_ROWS 行を超えたら列を足す
+  const LEG_ROWS = 15;
+  const body = !ss.length ? "" : `<div class="cpair"><div class="cchart">${svg}</div>`
+    + `<div class="legend vlegend" style="grid-template-rows:repeat(${Math.min(ss.length, LEG_ROWS)}, auto)">${legend}</div></div>`
+    + note + `<div class="wrap"><table class="ctbl">${head}${rows}</table></div>`;
 
   return `<h3><span class="g-map">${esc(ch.map || "")}</span>`
     + (ch.merged ? `<span class="g-n">LaRe モデル学習 (台数をまとめた図)</span><span class="g-t">${ch.t_max_m}M</span>`
                  : `<span class="g-n">${ch.agents} agent</span><span class="g-t">${ch.t_max_m}M</span>`)
     + ($("c-per-agent").checked ? `<span class="mut sm"> 1 台あたり</span>` : "") + `</h3>`
-    + (ss.length ? `<div class="cchart"><svg viewBox="0 0 ${W} ${H}" width="100%">${g}</svg>`
-      + `<div class="legend">${legend}</div></div>`
-      + `<div class="wrap"><table class="ctbl">${head}${rows}</table></div>` : "")
+    + body
     + (noCurve.length ? `<div class="mut sm">曲線をまだ取れていない run: ${noCurve.map(s =>
         esc(curCond(s) + " / " + s.machine)).join(", ")}</div>` : "");
 }
@@ -1577,13 +1797,40 @@ $("c-lare-merge").addEventListener("change", () => {
   renderCurves();
 });
 $("c-per-agent").addEventListener("change", renderCurves);
+// 評価の指標のチェック。選んだものはこのブラウザに覚えておく
+try {
+  const v = localStorage.getItem("ldrp.curve.emetrics");
+  if (v != null) document.querySelectorAll("input.c-em").forEach(x => { x.checked = v.split(",").includes(x.value); });
+} catch (e) {}
+document.querySelectorAll("input.c-em").forEach(x => x.addEventListener("change", () => {
+  try { localStorage.setItem("ldrp.curve.emetrics", [...document.querySelectorAll("input.c-em:checked")].map(y => y.value).join(",")); } catch (e) {}
+  renderCurves();
+}));
+// 実行時 reassign のチェック (off / on)。こちらも覚えておく
+try {
+  const v = localStorage.getItem("ldrp.curve.ereassign");
+  if (v != null) document.querySelectorAll("input.c-er").forEach(x => { x.checked = v.split(",").includes(x.value); });
+} catch (e) {}
+document.querySelectorAll("input.c-er").forEach(x => x.addEventListener("change", () => {
+  try { localStorage.setItem("ldrp.curve.ereassign", [...document.querySelectorAll("input.c-er:checked")].map(y => y.value).join(",")); } catch (e) {}
+  renderCurves();
+}));
+// 評価表の表示・非表示。選んだ状態はこのブラウザに覚えておく (読めない環境でも動くよう try で包む)
+try { if (localStorage.getItem("ldrp.curve.evshow") === "0") $("c-evshow").checked = false; } catch (e) {}
+const syncEvOpts = () => { $("c-evopts").hidden = !$("c-evshow").checked; };
+syncEvOpts();
+$("c-evshow").addEventListener("change", () => {
+  try { localStorage.setItem("ldrp.curve.evshow", $("c-evshow").checked ? "1" : "0"); } catch (e) {}
+  syncEvOpts();
+  renderCurves();
+});
 $("c-color").addEventListener("change", () => { $("c-color").dataset.user = "1"; fillCurveFilters(); renderCurves(); });
 $("c-dash").addEventListener("change", () => { $("c-dash").dataset.user = "1"; });
-["c-metric", "c-map", "c-n", "c-dash", "c-smooth", "c-mean"]
+["c-metric", "c-map", "c-n", "c-dash", "c-smooth", "c-mean", "c-band",
+ "c-ealloc"]
   .forEach(id => $(id).addEventListener("change", renderCurves));
 
 setInterval(() => { if ($("auto").checked) loadTrain(); }, 60000);
-// 学習曲線は収集 (15 分おき) でしか変わらないので、開いているときだけ 5 分おきに取り直す
 // 学習曲線タブを開いている間は 1 分おきに取り直す (サーバ側の収集は 5 分おき)。
 // 学習中の run の曲線を追えるようにするため
 setInterval(() => { if ($("auto").checked && tab === "curve") loadCurves(); }, 60000);
@@ -1597,3 +1844,92 @@ if (location.hash.startsWith("#curve")) {
   setTab("curve");
 }
 else if (location.hash === "#eval") setTab("eval");
+
+
+// ---------------------------------------------------------------------------
+// 自動実行 (tools/autorun.py) の依頼。投入そのものは autorun.py tick (15 分おき) が行う
+// ---------------------------------------------------------------------------
+let AUTORUN = null;
+async function loadAutorun() {
+  try { AUTORUN = await api("/api/autorun"); } catch (e) { AUTORUN = null; }
+  renderAutorun();
+}
+function renderAutorun() {
+  const tbl = $("ar-tbl"), ctl = $("ar-ctl");
+  if (!tbl) return;
+  if (!AUTORUN || !AUTORUN.hosts) {
+    tbl.innerHTML = `<tr><td class="mut">サーバを再起動すると使えます</td></tr>`;
+    ctl.innerHTML = "";
+    return;
+  }
+  const on = AUTORUN.hosts.filter(h => h.enabled).map(h => h.label);
+  ctl.innerHTML = `<button type="button" class="ack" id="ar-pause">${AUTORUN.paused ? "再開" : "一時停止"}</button>`
+    + ` <button type="button" class="ack" id="ar-tick" title="15 分おきの実行を待たずに 1 回投入する">今すぐ投入</button>`
+    + (AUTORUN.paused ? ` <span class="wrn">一時停止中 (新しい投入をしません)</span>` : "")
+    + (on.length ? ` <span class="mut sm">使うマシン: ${esc(on.join(", "))} / 学習は全体で ${AUTORUN.max_train_total} 本まで</span>`
+                 : ` <span class="wrn sm">投入できるマシンがありません (collect_config.yaml の autorun.enabled)</span>`);
+  const R = AUTORUN.requests || [];
+  const ST = { open: "受付中", done: "完了", cancelled: "取り消し", error: "エラー" };
+  tbl.innerHTML = "<tr><th>依頼</th><th>種類</th><th>条件</th><th class=\"num\">本数</th><th>マシン</th><th>状態</th><th></th></tr>"
+    + (R.length ? R.map(r => `<tr${r.status === "open" ? "" : ' class="mut"'}>
+        <td>${esc(r.id)}</td>
+        <td>${r.kind === "train" ? "学習" + (r.then_eval ? "+評価" : "") : "評価"}</td>
+        <td class="sm">${esc([].concat(r.cond_text || []).join(" / "))}</td>
+        <td class="num">${r.kind === "train" ? `${r.launched}/${r.count}` : (r.models ? r.models + " モデル" : "-")}</td>
+        <td>${esc((r.hosts && r.hosts.length ? r.hosts : (r.machines || ["自動"])).join(", "))}</td>
+        <td>${esc(ST[r.status] || r.status)}${r.note ? ` <span class="wrn sm" title="${esc(r.note)}">⚠</span>` : ""}</td>
+        <td>${r.status === "open" ? `<button type="button" class="ack ar-cancel" data-id="${esc(r.id)}"`
+             + ` title="まだ投入していない分を取り消す (動いている run は止めない)">取り消す</button>` : ""}</td></tr>`).join("")
+      : `<tr><td class="mut" colspan="7">依頼はありません</td></tr>`);
+}
+// 条件行の「依頼」: 下に小さな入力欄を開く
+function arForm(id) {
+  const hosts = (AUTORUN && AUTORUN.hosts) || [];
+  return `<tr class="arrow" data-ar-row="${esc(id)}"><td colspan="8">
+    <span class="arform">学習 <input type="number" class="ar-n" min="1" max="10" value="1"> 本
+    マシン <select class="ar-m"><option value="">自動</option>${hosts.map(h =>
+      `<option value="${esc(h.label)}"${h.enabled ? "" : " disabled"}>${esc(h.label)}${h.enabled ? "" : " (無効)"}</option>`).join("")}</select>
+    <label><input type="checkbox" class="ar-ev"> 終わったら評価</label>
+    <button type="button" class="ack ar-train" data-id="${esc(id)}">学習を依頼</button>
+    <button type="button" class="ack ar-eval" data-id="${esc(id)}" title="この条件の完了した run を評価する (評価済みの条件は飛ばす)">評価を依頼</button>
+    <span class="mut sm ar-msg"></span></span></td></tr>`;
+}
+document.addEventListener("click", async ev => {
+  const t = ev.target;
+  if (t.classList.contains("arbtn")) {
+    const tr = t.closest("tr"), id = t.getAttribute("data-ar");
+    const open = tr.nextElementSibling && tr.nextElementSibling.getAttribute("data-ar-row") === id;
+    if (open) tr.nextElementSibling.remove();
+    else tr.insertAdjacentHTML("afterend", arForm(id));
+    return;
+  }
+  if (t.classList.contains("ar-train") || t.classList.contains("ar-eval")) {
+    const row = t.closest("tr"), msg = row.querySelector(".ar-msg");
+    const m = row.querySelector(".ar-m").value;
+    const body = { kind: t.classList.contains("ar-train") ? "train" : "eval", ids: [t.getAttribute("data-id")],
+                   n: Number(row.querySelector(".ar-n").value) || 1,
+                   then_eval: row.querySelector(".ar-ev").checked, machines: m ? [m] : [] };
+    t.disabled = true;
+    const res = await api("/api/autorun/add", body);
+    msg.textContent = res.ok ? `${res.ids.join(", ")} を受け付けました (次の投入で実行)` : `失敗: ${res.error || ""}`;
+    t.disabled = false;
+    loadAutorun();
+    return;
+  }
+  if (t.classList.contains("ar-cancel")) {
+    await api("/api/autorun/cancel", { id: t.getAttribute("data-id") });
+    loadAutorun();
+    return;
+  }
+  if (t.id === "ar-pause") {
+    await api("/api/autorun/pause", { on: !(AUTORUN && AUTORUN.paused) });
+    loadAutorun();
+    return;
+  }
+  if (t.id === "ar-tick") {
+    t.disabled = true;
+    await api("/api/autorun/tick", {});
+    t.textContent = "投入中… (結果は依頼の表に出ます)";
+    setTimeout(loadAutorun, 60000);
+  }
+});

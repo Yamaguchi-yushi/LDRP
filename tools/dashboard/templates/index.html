@@ -61,6 +61,9 @@
   <h2 id="t-att-h" hidden>要確認 <button id="t-att-all" class="ack">すべて OK</button></h2>
   <div class="wrap"><table id="t-att"></table></div>
 
+  <h2>自動実行の依頼 <span class="mut sm">計画表の行の「依頼」から学習・評価を頼めます</span> <span id="ar-ctl"></span></h2>
+  <div class="wrap"><table id="ar-tbl"></table></div>
+
   <h2>conditions</h2>
   <div id="t-conds"></div>
 </section>
@@ -110,13 +113,37 @@
       <option value="10">10 点</option><option value="20">20 点</option>
     </select></span>
     <span title="同じ条件の seed をまとめて 1 本にする (seed が 1 本なら変わらない)">
-      <label><input type="checkbox" id="c-mean"> 条件で平均</label></span>
+      <label><input type="checkbox" id="c-mean" checked> 条件で平均</label></span>
+    <span title="条件で平均したとき、seed のばらつきを薄い色の帯で出す (seed が 2 本以上の条件だけ)">
+      <label>帯</label><select id="c-band">
+      <option value="range" selected>範囲 (最小〜最大)</option><option value="sd">平均 ± 標準偏差</option>
+      <option value="">なし</option></select></span>
     <span><label><input type="checkbox" id="c-lare" checked> LaRe モデル学習の章も出す</label></span>
     <span title="台数の違う LaRe モデル学習の run を、マップ・学習量 (t_max) ごとに 1 枚の図に重ねる。凡例はその run が作る LaRe モデルの名前">
       <label><input type="checkbox" id="c-lare-merge"> LaRe モデル学習は台数をまとめる</label></span>
     <span title="値を台数で割る (台数の違う run どうしを比べるとき)">
       <label><input type="checkbox" id="c-per-agent"> 台数で割る</label></span>
     <span class="mut">凡例をクリックすると、その線を消す / 戻す</span>
+  </div>
+  <!-- 章ごとの評価表 (results/ の評価ログを、run の評価用モデル名で結び付ける) -->
+  <div class="bar filters">
+    <span title="学習曲線だけ見たいときは外す (選んだ状態はこのブラウザに覚えておく)">
+      <label><input type="checkbox" id="c-evshow" checked> 評価表を出す</label></span>
+    <span id="c-evopts">
+    <span title="チェックした指標ごとに、到着率の列のかたまりを表の右に足す"><label>評価指標</label>
+      <label><input type="checkbox" class="c-em" value="task_completion" checked> task_completion</label>
+      <label><input type="checkbox" class="c-em" value="task_completion_per_agent"> per_agent</label>
+      <label><input type="checkbox" class="c-em" value="task_dropped"> task_dropped</label>
+      <label><input type="checkbox" class="c-em" value="goal_account"> goal_account</label>
+      <label><input type="checkbox" class="c-em" value="deadhead_ratio"> deadhead_ratio</label>
+    </span>
+    <span title="評価時に環境の reassign (タスクの再配布) を使うか。チェックした分だけ各到着率の下に列が並ぶ"><label>実行時 reassign</label>
+      <label><input type="checkbox" class="c-er" value="off" checked> off</label>
+      <label><input type="checkbox" class="c-er" value="on" checked> on</label></span>
+    <span title="評価時のタスク割当。既定は学習時と同じ (TP で学習した run は tp、PPO は ppo)"><label>評価の割当</label><select id="c-ealloc">
+      <option value="">学習と同じ</option><option value="tp">tp</option><option value="ppo">ppo</option>
+    </select></span>
+    </span>
   </div>
   <div id="c-body"></div>
 </section>

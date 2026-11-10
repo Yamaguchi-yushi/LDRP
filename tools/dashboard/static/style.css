@@ -204,3 +204,29 @@ tr:hover .exlbtn,.exlbtn:focus{visibility:visible}
 .cleg.off{opacity:.35;text-decoration:line-through}
 table.ctbl td,table.ctbl th{padding:2px 8px}
 table.ctbl td.cbest{font-weight:700}
+/* 学習曲線の章: 図 | 凡例、その下に評価表 */
+.cpair{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-start}
+.cpair>.cchart{flex:1 1 560px;min-width:0}
+/* 図の横の凡例: 1 項目 1 行。行数 (app.js の LEG_ROWS) を超えたら列を右に足す */
+.vlegend{flex:0 0 auto;display:grid;grid-auto-flow:column;column-gap:14px;align-content:start}
+.vlegend .cleg{white-space:nowrap;margin:0 0 4px 0}
+/* 学習 | 評価 の 2 段見出しと、評価の列の前の区切り線 */
+table.ctbl th.grp{text-align:center;border-bottom:1px solid var(--line)}
+table.ctbl tr>.egap.egap{border-left:2px solid var(--mut)}
+table.ctbl tr>.agap.agap{border-left:1px solid var(--mut)}   /* 評価の到着率どうしの区切り (下に reassign off / on) */   /* 学習 | 評価、評価の指標どうしの区切り */
+.cdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;vertical-align:middle}
+table.etbl td{white-space:nowrap}
+#c-evopts{display:inline-flex;gap:10px;flex-wrap:wrap;align-items:center}
+#c-evopts[hidden]{display:none}
+table.ctbl .cst{text-align:center;padding:2px 4px;white-space:nowrap}
+table.ctbl{width:auto}   /* 中身の幅に詰める (全幅に広げると条件の列が伸びて間が空く) */
+/* 列ごとの細い縦線 (かたまりの境目は .egap の太い線) */
+table.ctbl td,table.ctbl th{border-left:1px solid var(--line)}
+table.ctbl tr>:first-child{border-left:none}
+
+/* 自動実行の依頼 */
+button.arbtn{font-size:11px;padding:0 6px;margin-left:6px;opacity:.7}
+button.arbtn:hover{opacity:1}
+tr.arrow td{background:var(--card)}
+.arform input.ar-n{width:3.5em}
+.arform > *{margin-right:6px}
