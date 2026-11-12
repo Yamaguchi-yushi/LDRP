@@ -58,6 +58,41 @@ def settings():
             "eval_repo": ex(w.get("eval_repo") or "~/LDRP_eval")}
 
 
+SF_DATALESS = 0x40000000           # macOS: 中身がまだ手元に無い iCloud のファイル (ls -lO で dataless と出る)
+DOWNLOAD_WAIT_SEC = 120             # 1 回の実行でダウンロードを待つ長さ。間に合わなければ次の回にもう一度
+
+
+def is_dataless(path):
+    try:
+        return bool(getattr(os.stat(path), "st_flags", 0) & SF_DATALESS)
+    except OSError:
+        return False
+
+
+def ensure_local(paths, wait=DOWNLOAD_WAIT_SEC):
+    """iCloud のファイルを手元にダウンロードさせて待つ. 返り値: まだダウンロードされていないパス.
+
+    launchd から動く worker では、ファイルを開いても iCloud が自動でダウンロードしない
+    (自分のシェルからなら開いたときにダウンロードされる。2026-11-12 黒で確認)。そこで brctl download で頼む。
+    """
+    todo = [p for p in paths if is_dataless(p)]
+    for p in todo:
+        subprocess.run(["brctl", "download", p], capture_output=True, timeout=60)
+    end = time.time() + wait
+    while todo and time.time() < end:
+        time.sleep(3)
+        todo = [p for p in todo if is_dataless(p)]
+    return todo
+
+
+def job_paths(s, job):
+    """ジョブが共有フォルダから読むファイル (コードの束・添付)."""
+    out = [os.path.join(s["base"], f["src"]) for f in job.get("files") or []]
+    if job.get("code"):
+        out.append(os.path.join(s["base"], job["code"]))
+    return out
+
+
 def md5(path):
     with open(path, "rb") as f:
         return hashlib.md5(f.read()).hexdigest()
@@ -128,8 +163,20 @@ def take_jobs(s):
     """inbox のジョブを started/ に移してから起動する (移してから起動するので、2 回起動しない)."""
     errors = AR.load_json(ERRORS, [])
     for p in sorted(glob.glob(os.path.join(s["base"], "inbox", "*.json"))):
+        # 中身が手元に無い (dataless) ままだと読めないので、先にダウンロードさせる
+        if ensure_local([p]):
+            log("waiting for iCloud to download %s" % os.path.basename(p))
+            continue
         job = AR.load_json(p, None)
         if job is None:                     # 同期の途中など。次の回にもう一度読む
+            log("cannot read %s yet (still syncing?)" % os.path.basename(p))
+            continue
+        # コードの束・モデルも揃ってから started/ に移す (揃う前に移すと、失敗扱いになって二度と試さない)
+        missing = ensure_local([x for x in job_paths(s, job) if os.path.exists(x)])
+        absent = [x for x in job_paths(s, job) if not os.path.exists(x)]
+        if missing or absent:
+            log("waiting for iCloud for %s: %s" % (job.get("id"), ", ".join(
+                os.path.basename(x) for x in missing + absent)))
             continue
         started = os.path.join(s["base"], "started")
         os.makedirs(started, exist_ok=True)

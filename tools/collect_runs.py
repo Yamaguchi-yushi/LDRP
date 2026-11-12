@@ -1973,10 +1973,12 @@ def collect_ssh(host, tail_bytes, timeout, verbose=False, only_dirs=None,
     return _collect_ssh_run(host, py, remote_args, timeout, verbose, multiplex)
 
 
-def pull_eval_logs(hosts, repo=None, timeout=120, verbose=False):
+def pull_eval_logs(hosts, repo=None, timeout=120, verbose=False, drop_root=None):
     """別マシンで回した方策評価のログ (*.txt) を手元の logs/ に取ってくる.
 
     collect_config.yaml の host に `eval_logs: ~/LDRP_eval/logs` のように書いたものだけが対象。
+    共有フォルダのマシン (drop) は、tools/autorun_worker.py が <drop_root>/<label>/autorun/eval_logs/ に
+    写したものを取る (eval_logs: の指定は要らない)。
     ダッシュボードは手元の logs/ の [RESULT] 行しか読まないので、取ってくれば評価表に出る。
     何か新しく届いたときだけ aggregate.py --csv で results/summary.csv を作り直す。
     返り値: [(host label, エラー文)]
@@ -1985,18 +1987,26 @@ def pull_eval_logs(hosts, repo=None, timeout=120, verbose=False):
     errors, changed = [], False
     for h in hosts:
         src = h.get("eval_logs")
-        if not src or h.get("ssh") in (None, "", "local"):
+        dd = drop_dir_for(h, drop_root) if h.get("ssh") in (None, "") else None
+        if dd:
+            src = os.path.join(dd, "autorun", "eval_logs")
+            if not os.path.isdir(src):
+                continue                    # まだ一度も評価を回していないマシン
+            cmd = ["rsync", "-a", "--itemize-changes", "--include", "*/", "--include", "*.txt",
+                   "--exclude", "*", src + "/", os.path.join(repo, "logs") + "/"]
+        elif not src or h.get("ssh") in (None, "", "local"):
             continue
-        rel = src[2:] if src.startswith("~/") else src       # rsync のリモート側は ~ を展開しない
-        ssh = ["ssh", "-o", "BatchMode=yes"]
-        for opt in h.get("ssh_options") or []:
-            ssh += ["-o", opt]
-        ssh += ["-o", "ConnectTimeout=%d" % int(h.get("connect_timeout", 8))]
-        if h.get("port"):
-            ssh += ["-p", str(h["port"])]
-        cmd = ["rsync", "-az", "--itemize-changes", "-e", " ".join(ssh),
-               "--include", "*/", "--include", "*.txt", "--exclude", "*",
-               "%s:%s/" % (h["ssh"], rel.rstrip("/")), os.path.join(repo, "logs") + "/"]
+        else:
+            rel = src[2:] if src.startswith("~/") else src       # rsync のリモート側は ~ を展開しない
+            ssh = ["ssh", "-o", "BatchMode=yes"]
+            for opt in h.get("ssh_options") or []:
+                ssh += ["-o", opt]
+            ssh += ["-o", "ConnectTimeout=%d" % int(h.get("connect_timeout", 8))]
+            if h.get("port"):
+                ssh += ["-p", str(h["port"])]
+            cmd = ["rsync", "-az", "--itemize-changes", "-e", " ".join(ssh),
+                   "--include", "*/", "--include", "*.txt", "--exclude", "*",
+                   "%s:%s/" % (h["ssh"], rel.rstrip("/")), os.path.join(repo, "logs") + "/"]
         if verbose:
             sys.stderr.write("  $ %s\n" % " ".join(cmd))
         try:
@@ -5514,7 +5524,7 @@ def main(argv=None):
     drop_root = args.drop_root or conf.get("drop_root")
 
     # 別マシンで回した方策評価のログを logs/ に取ってくる (host に eval_logs: があるときだけ)
-    for label, err in pull_eval_logs(hosts, verbose=args.verbose):
+    for label, err in pull_eval_logs(hosts, verbose=args.verbose, drop_root=drop_root):
         sys.stderr.write("[eval-logs] %s: %s\n" % (label, err))
 
     # 学習曲線の仕様。--curve-spec (make_graph が書く) が優先、無ければ config

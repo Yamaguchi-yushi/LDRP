@@ -859,7 +859,7 @@ class State(object):
                     sys.stderr.write("[host] %s\n" % e)
 
             # 別マシンで回した方策評価のログを logs/ に取ってくる (host に eval_logs: があるときだけ)
-            errors = list(errors) + CR.pull_eval_logs(hosts)
+            errors = list(errors) + CR.pull_eval_logs(hosts, drop_root=conf.get("drop_root"))
 
             cache = os.path.expanduser(self.args.cache)
             merged = CR.dedupe(CR.read_cache(cache) + runs)

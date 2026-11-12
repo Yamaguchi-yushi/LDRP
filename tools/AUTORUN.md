@@ -56,6 +56,8 @@ python tools/autorun.py find aoba00 7agent "8x5_5 10M aoba00_5 10M" TP   # 計�
 python tools/autorun.py add train <id> -n 2 --then-eval                 # 2 本学習し、終わったら評価
 python tools/autorun.py add eval <id> [<id> ...]                        # done の run を評価
 python tools/autorun.py add train <id> -n 1 --machines 黒               # 回すマシンを指定
+python tools/autorun.py add train <id> -n 1 --like <id2> --lare-model QMIX_PATH_....pth
+                                    # 実績の無い条件 (新しい LaRe モデル) を、条件 id2 の run の設定で LaRe モデルだけ替えて学習
 python tools/autorun.py status                                          # 依頼ごとの進み具合
 python tools/autorun.py hosts                                           # マシンごとの空き
 python tools/autorun.py cancel q3                                       # 取り消し (動いている run は止めない)
@@ -171,6 +173,7 @@ tail ~/.ldrp/autorun/worker.log                                           # 動�
 | `train_priority` / `eval_priority` | 優先順位。小さいほど先に埋める (既定 0)。同じ段の中では終わる時刻が早いマシン |
 | `shared` | `true` = 他の人と共有のマシン。学習が `autorun_max_train_total` (トップレベル) の上限に数えられる |
 | `gpu_mem_per_train_mb` / `max_gpu_util` | GPU の空きメモリが足りない・使用率が高いときは学習を入れない |
+| `cpu_algos` | 例 `[mappo]`。このアルゴリズムの学習は GPU を見せずに (`CUDA_VISIBLE_DEVICES=""` を付けて) CPU で回す。GPU の空き・使用率の判定もしない。2026-11-12 から GPU1 / GPU2 で MAPPO に一時的に設定中 |
 | `eval_speed` | 評価の速さの比 (1.0 = 1 条件 12 分)。順番の見積もりに使う |
 | `python` / `train_repo` / `eval_repo` | ssh のマシンだけ書く。共有フォルダのマシンは worker が `status.json` で知らせる |
 
