@@ -66,6 +66,7 @@ class DrpEnv(gym.Env):
 			# 保存間引きしきい値 (= 累積環境ステップ). デフォルト 500_000 = 0.5M ごとに保存.
 			# 学習頻度 (update_freq) とは独立. 0 にすると毎更新ごとに保存.
 			lare_path_save_freq_steps=500_000,
+			lare_path_factor_version=1,	# LaRe-Path の評価関数の版 (src/lare/path/factor_versions.py)
 			lare_task_save_freq_steps=500_000,
 			# PBS 互換モード: True にすると待機分岐で current_goal を非 None に保つ
 			# (PBS の path 計画で必要). False にすると SafeEnv の保護が待機 agent
@@ -238,6 +239,7 @@ class DrpEnv(gym.Env):
 		self._lare_task_creation_steps = []
 		# 保存間引きしきい値 (累積環境ステップ単位). LaRe-Path/Task の自動保存に適用.
 		self.lare_path_save_freq_steps = int(lare_path_save_freq_steps)
+		self.lare_path_factor_version = int(lare_path_factor_version)
 		self.lare_task_save_freq_steps = int(lare_task_save_freq_steps)
 
 		if self.use_lare_path:
@@ -356,7 +358,9 @@ class DrpEnv(gym.Env):
 		if self.use_finetuning_lare_path and self.finetuning_lare_path_model_name:
 			source = self._lare_get_source_base_name()
 			return f"FT_{source}_{safe_seg}{map_name}_{agents}agents_{steps}_{suffix}.pth"
-		return f"{algo}_PATH_{safe_seg}{map_name}_{agents}agents_{steps}_{suffix}.pth"
+		# 評価関数の版 1 (今まで) は付けない。2 以降は PATH の後ろに F2 のように付ける
+		ver = f"F{self.lare_path_factor_version}_" if self.lare_path_factor_version != 1 else ""
+		return f"{algo}_PATH_{ver}{safe_seg}{map_name}_{agents}agents_{steps}_{suffix}.pth"
 
 	def _lare_resolve_autosave_path(self):
 		"""Decide the autosave path for the current run.
@@ -490,6 +494,7 @@ class DrpEnv(gym.Env):
 
 			cfg = LaRePathConfig(
 				factor_dim=factor_dim,
+				factor_version=self.lare_path_factor_version,
 				decoder_hidden_dim=decoder_hidden_dim,
 				decoder_n_layers=decoder_n_layers,
 				use_transformer=use_transformer,
@@ -519,6 +524,11 @@ class DrpEnv(gym.Env):
 					f"🌱 [LaRe-Path] Scratch (online train, training={self.use_lare_path_training}, "
 					f"factors={factor_dim})"
 				)
+		except (FileNotFoundError, ValueError):
+			# 指定したモデルが無い・読めない・評価関数の版が合わない。
+			# 環境の報酬に黙って戻すと use_lare_path=False のまま学習が進み、config.json には
+			# 「LaRe あり」と残るので後から見分けられない (2026-10-15 に GPU で 4 本が LaRe なしで走った)
+			raise
 		except Exception as e:
 			print(f"[LaRe-Path] Failed to initialize, falling back to env reward: {e}")
 			self.use_lare_path = False
@@ -559,7 +569,9 @@ class DrpEnv(gym.Env):
 			mode = "frozen (inference only)" if freeze else "trainable (finetuning)"
 			print(f"{emoji} [LaRe-Path][{label}] Loaded {resolved} - {mode}")
 		except Exception as e:
-			print(f"⚠️ [LaRe-Path][{label}] Load failed ({e}); falling back to scratch.")
+			# 壊れたファイル・形の違うデコーダなど。scratch に切り替えて続けると、
+			# 事前学習ありのつもりで事前学習なしの run になるので止める
+			raise ValueError(f"[LaRe-Path][{label}] Load failed: {resolved}: {e}") from e
 
 	# ---------------- LaRe-Task initialisation / weight-loading ----------------
 	def _init_lare_task(self, factor_dim, decoder_hidden_dim, decoder_n_layers,
@@ -616,6 +628,10 @@ class DrpEnv(gym.Env):
 					f"🌱 [LaRe-Task] Scratch (online train, training={self.use_lare_task_training}, "
 					f"factors={factor_dim})"
 				)
+		except (FileNotFoundError, ValueError):
+			# 指定したモデルが無い・読めない。環境の報酬に黙って戻すと use_lare_task=False の
+			# まま学習が進み、config.json には「LaRe あり」と残るので止める (Path 側と同じ)
+			raise
 		except Exception as e:
 			print(f"[LaRe-Task] Failed to initialize, falling back to env reward: {e}")
 			self.use_lare_task = False
@@ -646,7 +662,9 @@ class DrpEnv(gym.Env):
 			mode = "frozen (inference only)" if freeze else "trainable (finetuning)"
 			print(f"{emoji} [LaRe-Task][{label}] Loaded {resolved} - {mode}")
 		except Exception as e:
-			print(f"⚠️ [LaRe-Task][{label}] Load failed ({e}); falling back to scratch.")
+			# 壊れたファイル・形の違うデコーダなど。scratch に切り替えて続けると、
+			# 事前学習ありのつもりで事前学習なしの run になるので止める (Path 側と同じ)
+			raise ValueError(f"[LaRe-Task][{label}] Load failed: {resolved}: {e}") from e
 
 	def _lare_compute_colliding_pairs(self, obs_prepare):
 		"""Mirror MARL4DRP.get_collision_agents() — returns list of pairs [[i, j], ...]."""
@@ -798,6 +816,11 @@ class DrpEnv(gym.Env):
 		#initialize obs
 		self.active = [True] * self.agent_num
 		self.pending_off = [False] * self.agent_num
+		# 台数制御の発火回数. n_active_mean は「初期抽選 + 参入 - off」が混ざった値なので,
+		# off / 参入が実際に起きているかを単独では判別できない. 分離用のカウンタ.
+		self.off_command_count = 0   # -2 指示が受理された回数
+		self.off_done_count = 0      # station に到着して非アクティブ化した回数
+		self.spawn_count = 0         # 非アクティブ機が参入した回数
 		if self.use_dynamic_agents:
 			assert self.is_tasklist, "tasklist must be True when use_dynamic_agents is True"
 			assert self.station_nodes, f"There is not station node in {self.map_name} when use_dynamic_agents is True"
@@ -863,6 +886,15 @@ class DrpEnv(gym.Env):
 		self.service_count = 0
 		# ピック時に発生時刻を退避する (current_tasklist から pop されて失われるため)
 		self._agent_task_creation = [None] * self.agent_num
+		# LaRe-Path の観測 (版 2 以降) 用の記録. 学習・報酬には使わない
+		self._lare_events = [[0, 0] for _ in range(self.agent_num)]	# [ピックアップした, 配達した]
+		self._lare_task_key = [None] * self.agent_num			# 今のタスク (割当が変わったかの判定)
+		self._lare_assign_step = [0] * self.agent_num			# 今のタスクを割り当てたステップ
+		self._lare_task_created = [0] * self.agent_num			# 今のタスクが発生したステップ
+		# 版 3 の観測用
+		self._lare_next = [None] * self.agent_num			# このステップで向かったノード (止まったら None)
+		self._lare_ideal_len = [0.0] * self.agent_num		# 割当時の位置 → ピックアップ → 配達先 の最短の道のり
+		self._lare_dropped_step = 0					# このステップで捨てたタスクの数
 
 		obs = self.obs_manager.calc_obs()
 
@@ -971,6 +1003,10 @@ class DrpEnv(gym.Env):
 			self.reset_prepick_assignments()
 			task_assign = self._default_task_assign_tp()
 
+		# LaRe-Path の観測用: このステップのピックアップ・配達の印を消す
+		self._lare_events = [[0, 0] for _ in range(self.agent_num)]
+		self._lare_next = [None] * self.agent_num
+		self._lare_dropped_step = 0
 		# LaRe-Path: snapshot per-agent onehot positions BEFORE movement.
 		if self.use_lare_path and self.lare_path_module is not None:
 			self._lare_prev_onehot_pos = self._lare_capture_prev_onehot_pos()
@@ -1024,6 +1060,7 @@ class DrpEnv(gym.Env):
 			else:
 				#self.joint_action_old[i] = joint_action[i]
 				self.current_goal_prepare[i] = joint_action[i] #update 行き先ノード when avable action is taken
+				self._lare_next[i] = int(joint_action[i])	# LaRe-Path の観測用 (版 3)
 				obs_i = self.obs[i]
 				self.wait_count[i] = 0
 		
@@ -1087,6 +1124,10 @@ class DrpEnv(gym.Env):
 			"1agent_goal_account": self.reach_account/self.agent_num,
 			"task_completion": self.task_completion,
 			"n_active_mean": self.active_agent_steps / max(1, self.step_account), # エージェント数の推移
+			# n_active_mean は初期抽選・参入・off が混ざるので, 発火回数を別に出す
+			"off_command": self.off_command_count, # off 指示が受理された回数
+			"off_done": self.off_done_count,       # station 到着で非アクティブ化した回数
+			"spawn": self.spawn_count,             # 非アクティブ機が参入した回数
 			"task_completion_per_agent": self.task_completion / max(1e-8, self.active_agent_steps / max(1, self.step_account)), # 正規化したタスク完了率
 			"busy_ratio": self.busy_agent_steps / max(1, self.active_agent_steps), # 稼働率
 			"deadhead_ratio": self.deadhead_agent_steps / max(1, self.busy_agent_steps), # 空車回送率
@@ -1148,6 +1189,7 @@ class DrpEnv(gym.Env):
 					self.task_arrival_count += 1
 				else:
 					self.task_dropped_count += 1
+					self._lare_dropped_step += 1
 
 			# remove the task from the list if it has been completed
 			for i in range(self.agent_num):
@@ -1157,6 +1199,8 @@ class DrpEnv(gym.Env):
 						if self.goal_array[i] == self.assigned_tasks[i][1]:
 							self.assigned_tasks[i] = [] # remove the task from assigned_tasks
 							self.task_completion += 1
+							self._lare_events[i][1] = 1
+							self._lare_task_key[i] = None
 							self._reassign_event = True
 							# 配送時間 (発生 -> 配達完了). ピック時に退避した発生時刻を使う.
 							_c = self._agent_task_creation[i]
@@ -1171,6 +1215,7 @@ class DrpEnv(gym.Env):
 						if self.active[i] and self.assigned_tasks[i] == [] and not self.pending_off[i]:
 							self.goal_array[i] = self._nearest_station(i)
 							self.pending_off[i] = True
+							self.off_command_count += 1
 						task_assign[i] = -1
 
 			# assign tasks to agents — capture pre-assignment state for LaRe-Task.
@@ -1187,6 +1232,7 @@ class DrpEnv(gym.Env):
 			 						for k in range(self.agent_num) if k != i):
 							continue
 						self.active[i] = True
+						self.spawn_count += 1
 						spawned_this_step += 1
 					if self.use_dynamic_agents and self.pending_off[i]:
 						self.pending_off[i] = False
@@ -1204,6 +1250,13 @@ class DrpEnv(gym.Env):
 					self.assigned_tasks[i] = self.current_tasklist[r]
 					self.goal_array[i] = self.assigned_tasks[i][0] # update goal to pick node
 					self.assigned_list[task_assign[i]] = i # update assigned_list
+					# LaRe-Path の観測用: 別のタスクになったときだけ割当時刻を更新する
+					# (再割当ありでは毎ステップ同じタスクが割り当て直されるため)
+					if self._lare_task_key[i] != tuple(task_r):
+						self._lare_task_key[i] = tuple(task_r)
+						self._lare_assign_step[i] = self.step_account
+						self._lare_task_created[i] = creation_step
+						self._lare_ideal_len[i] = self._lare_ideal_task_length(i, task_r)
 
 					lare_task_decisions.append({
 						"agent_id": int(i),
@@ -1247,6 +1300,7 @@ class DrpEnv(gym.Env):
 						if self.goal_array[i]==self.assigned_tasks[i][0]:
 							self.start_ori_array[i] = self.goal_array[i]
 							self.goal_array[i] = self.assigned_tasks[i][1]
+							self._lare_events[i][0] = 1
 							try:
 								idx = self.assigned_list.index(i)
 								self.current_tasklist.pop(idx)
@@ -1292,6 +1346,7 @@ class DrpEnv(gym.Env):
 
 						if str(pos_agenti) == str(self.pos[self.goal_array[i]]):
 							self.active[i] = False
+							self.off_done_count += 1
 							self.pending_off[i] = False
 							self.start_ori_array[i] = self.goal_array[i] # reward = 0
 
@@ -1498,6 +1553,20 @@ class DrpEnv(gym.Env):
 		else:
 			return self.ee_env.get_path_length(start, goal)
 		
+	def _lare_ideal_task_length(self, i, task):
+		"""今の位置 → ピックアップ → 配達先 の最短の道のり (LaRe-Path の観測 版 3 用).
+
+		辺の途中にいるときは、向かっているノード (current_goal) を経由する。
+		"""
+		pick, drop = int(task[0]), int(task[1])
+		if self.current_goal[i] is None:
+			to_pick = self.get_path_length(int(self.current_start[i]), pick)
+		else:
+			g = int(self.current_goal[i])
+			here = np.array(self.obs[i][:2], dtype=float)
+			to_pick = float(np.linalg.norm(np.array(self.pos[g], dtype=float) - here)) + self.get_path_length(g, pick)
+		return float(to_pick + self.get_path_length(pick, drop))
+
 	def get_near_nodes(self, node_num):
 		return self.ee_env.get_near_nodes(node_num)
 

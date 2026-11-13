@@ -3,9 +3,9 @@ import time
 import json
 import os
 
-_SLOT = os.path.expanduser("~/.ldrp/batch_%d.json" % os.getpid())
+_SLOT = os.path.expanduser("~/.ldrp/batch_%d.json" % os.getpid())   # for dashboard
 
-def _publish_batch(started, cmd=None):
+def _publish_batch(started, cmd=None):      # for dashboard
     try:
         os.makedirs(os.path.dirname(_SLOT), exist_ok=True)
         rec = {"pid": os.getpid(), "total": num_runs,
@@ -26,10 +26,10 @@ command = [
 'python3 src/main.py --config=qmix --env-config=gymma with env_args.time_limit=500 env_args.key="drp_env:drp_safe-4agent_map_aoba00-v2" env_args.state_repre_flag="onehot_fov" > train_results/qmix_drp_safe-4agent_map_8x5-v2.txt 2>&1'
 ]
 
-num_runs = 5
-maxpurocesses = 2
+num_runs = 1
+maxpurocesses = 1
 running_processes = []
-_publish_batch(0)
+_publish_batch(0)   # for dashboard
 
 for i in range(num_runs):
     #algとmap，実行step数確認，drp_envのpbs用の変更箇所
@@ -38,21 +38,25 @@ for i in range(num_runs):
         f'python src/epymarl/src/main.py --config=qmix --env-config=gymma '
         f'with env_args.time_limit=500 '
         f't_max=20050000 ' 
-        f'env_args.key="drp_env:drp_safe-5agent_map_8x5-v2" '
+        f'env_args.key="drp_env:drp_safe-5agent_map_aoba00-v2" '
         f'env_args.state_repre_flag="onehot_fov" '
-        f'env_args.use_lare_path=False '
-        f'env_args.use_lare_path_training=True '
+        f'env_args.use_lare_path=True '
+        f'env_args.use_lare_path_training=False '
+        # LaRe-Path の評価関数の版 (1: DRP の 10 因子 = 既定 / 2: LLM 生成 v1 / 3: LLM 生成 v2)。
+        # 版 1 なら書かなくてよい。2・3 は学習済みデコーダが無いので pretrained / finetuning を False にして scratch で回す
+        # (design/lare_factor_versions.md §4.4・§8.7)
+        # f'env_args.lare_path_factor_version=2 '
         f'env_args.use_pretrained_lare_path=False '
         f'env_args.pretrained_lare_path_model_name="FT_QMIX_PATH_Safe_map_8x5_2agents_10.0M_Safe_map_aoba00_2agents_5.0M_checkpoint.pth" '
-        f'env_args.use_finetuning_lare_path=True '
-        f'env_args.finetuning_lare_path_model_name="QMIX_PATH_Safe_map_8x5_7agents_20.0M_checkpoint.pth" '
+        f'env_args.use_finetuning_lare_path=False '
+        f'env_args.finetuning_lare_path_model_name="QMIX_PATH_Safe_map_aoba00_5agents_10.0M_checkpoint.pth" '
         f'env_args.allow_reassign_before_pickup=False '
         # --- タスク到着のランダム化 (学習用) ---------------------------------
         # True: エピソード毎に bernoulli(p ランダム) / mmpp を引き直す。
         #       1 つの方策を全シナリオで評価するために必要
         #       (シナリオ毎に学習すると方策が需要水準を暗黙に知ることになる)。
         # False: 下の task_arrival / task_density 等の固定値で回す (従来動作)。
-        f'env_args.randomize_task_arrival=True '
+        f'env_args.randomize_task_arrival=False '
         f'env_args.mmpp_ratio=0.5 '        # MMPP を引く確率 (残りが bernoulli)
         f'env_args.rand_p_min=0.01 '       # bernoulli p の下限 (全マップ共通)
         f'env_args.rand_p_max=0.10 '       # bernoulli p の上限 (全マップ共通)
@@ -75,7 +79,7 @@ for i in range(num_runs):
         f'env_args.min_active_agents=1 '
         f'env_args.max_active_agents=7 '
         # 同時学習
-        f'train_task_assigner=True '
+        f'train_task_assigner=False '
         )
 
     # GPUを使用するMARLアルゴリズムをCPUで実行する場合
@@ -118,7 +122,7 @@ for p in running_processes:
     p.wait()
 
 print("All runs completed.")
-try:
+try:    # for dashboard
     os.remove(_SLOT)
 except OSError:
     pass
