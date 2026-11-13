@@ -926,6 +926,11 @@ class State(object):
             LM.auto_install(conds, rows, PLAN.matches)
         except Exception as e:
             sys.stderr.write("[lare] install: %s: %s\n" % (type(e).__name__, e))
+        # 計画表の LaRe モデルの印 (LaRe model 列・setting の ✅) を手元のファイルに合わせる
+        try:
+            LM.update_plan_marks(conds, rows, PLAN.matches)
+        except Exception as e:
+            sys.stderr.write("[lare] plan marks: %s: %s\n" % (type(e).__name__, e))
 
     def curves(self):
         """「学習曲線」タブ用: 計画の章 (計画 x グループ x マップ x 台数 x t_max) ごとに、

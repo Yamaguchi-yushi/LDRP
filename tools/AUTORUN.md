@@ -62,6 +62,10 @@ python tools/autorun.py status                                          # 依頼
 python tools/autorun.py hosts                                           # マシンごとの空き
 python tools/autorun.py cancel q3                                       # 取り消し (動いている run は止めない)
 python tools/autorun.py pause | resume                                  # 新しい投入を止める / 再開
+python tools/autorun.py pull [黒 M2]                                    # 共有フォルダのマシンに git pull --ff-only させる (5 分以内)
+python tools/autorun.py pull --check                                    # その結果 (前 -> 後のコミット、失敗の理由)
+    # train.py はマシンごとに書き換えて使うので、pull でも手元の版を残す。上流の新しい版は train.py.upstream に置く
+    # (写しは ~/.ldrp/autorun/keep_local/)。対象のファイルは collect_config.yaml の autorun_worker.keep_local で変えられる
 ```
 
 - `python` は ldrp 環境の Python (白・黒では `/opt/anaconda3/envs/ldrp/bin/python`)

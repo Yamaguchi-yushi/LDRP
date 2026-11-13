@@ -5696,9 +5696,12 @@ def main(argv=None):
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
             import plan as _PLAN
             import lare_models as _LM
-            _LM.auto_install(_PLAN.parse_plans(_PLAN.find_plans(args.plan)), targets,
-                             _PLAN.matches,
+            _conds = _PLAN.parse_plans(_PLAN.find_plans(args.plan))
+            _LM.auto_install(_conds, targets, _PLAN.matches,
                              dry_run=args.fetch_dry_run or not args.fetch_models)
+            # 計画表の LaRe モデルの印を手元のファイルに合わせる (置いた直後のファイルも反映)
+            _LM.update_plan_marks(_PLAN.parse_plans(_PLAN.find_plans(args.plan)), targets, _PLAN.matches,
+                                  dry_run=args.fetch_dry_run)
         except Exception as e:
             sys.stderr.write("[lare] %s: %s\n" % (type(e).__name__, e))
         planned, _n = fetch_models(

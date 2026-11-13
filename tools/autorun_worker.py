@@ -55,7 +55,8 @@ def settings():
             "base": os.path.join(ex(root), str(label), "autorun"),
             "python": w.get("python") or sys.executable,
             "train_repo": ex(w.get("train_repo") or REPO),
-            "eval_repo": ex(w.get("eval_repo") or "~/LDRP_eval")}
+            "eval_repo": ex(w.get("eval_repo") or "~/LDRP_eval"),
+            "keep_local": w.get("keep_local")}
 
 
 SF_DATALESS = 0x40000000           # macOS: 中身がまだ手元に無い iCloud のファイル (ls -lO で dataless と出る)
@@ -183,7 +184,11 @@ def take_jobs(s):
         dst = os.path.join(started, os.path.basename(p))
         os.replace(p, dst)
         try:
-            (start_train if job.get("kind") == "train" else start_eval)(s, job)
+            kind = job.get("kind")
+            if kind == "pull":
+                job["result"] = git_pull(s)
+            else:
+                (start_train if kind == "train" else start_eval)(s, job)
             job["started_at"] = AR.now_utc().isoformat()
             log("started %s (%s)" % (job["id"], job.get("kind")))
         except Exception as e:
@@ -196,6 +201,58 @@ def take_jobs(s):
     with open(ERRORS, "w") as f:
         json.dump(errors, f, ensure_ascii=False)
     return errors
+
+
+# git pull で手元の版を優先するファイル (マシンごとに書き換えて使うもの)。
+# collect_config.yaml の autorun_worker.keep_local で変えられる
+KEEP_LOCAL = ["train.py"]
+
+
+def git_pull(s):
+    """train_repo で git pull --ff-only する (司令塔の `autorun.py pull <マシン>` から).
+
+    --ff-only: 手元にコミットしていない変更やずれた履歴があってマージが要るときは、何もせずに失敗する
+    (勝手にマージ・上書きしない)。失敗は例外にして worker_errors.json と started/ のジョブに残す。
+    動いている学習・評価は止めない (読み込み済みのコードで続く。次に起動するものから新しいコードになる)。
+    """
+    repo = s["train_repo"]
+    git = lambda *a: subprocess.run(["git", "-C", repo] + list(a), capture_output=True, text=True, timeout=300)
+    before = git("rev-parse", "--short", "HEAD").stdout.strip()
+    # マシンごとに書き換えて使うファイル (train.py) は手元の版を優先する。
+    # 手元の変更があると pull が止まるので、写しを取って戻し、pull のあとで手元の版を書き戻す。
+    # 上流の新しい版は <名前>.upstream として横に置く (見比べて、要る変更だけ手で取り込む)
+    kept = {}
+    for rel in s.get("keep_local") or KEEP_LOCAL:
+        path = os.path.join(repo, rel)
+        if os.path.exists(path) and git("diff", "--quiet", "HEAD", "--", rel).returncode == 1:
+            with open(path, "rb") as f:
+                kept[rel] = f.read()
+            bak = os.path.join(HOME_DIR, "keep_local", "%s.%s" % (rel.replace("/", "_"), time.strftime("%Y%m%d%H%M%S")))
+            os.makedirs(os.path.dirname(bak), exist_ok=True)
+            with open(bak, "wb") as f:
+                f.write(kept[rel])                      # 念のための写し (書き戻しに失敗しても残る)
+            git("checkout", "--", rel)
+    r = git("pull", "--ff-only")
+    after = git("rev-parse", "--short", "HEAD").stdout.strip()
+    notes = []
+    for rel, data in kept.items():
+        path = os.path.join(repo, rel)
+        with open(path, "rb") as f:
+            upstream = f.read()
+        if upstream != data and before != after:
+            with open(path + ".upstream", "wb") as f:
+                f.write(upstream)
+            notes.append("%s kept local (upstream copy: %s.upstream)" % (rel, rel))
+        else:
+            notes.append("%s kept local" % rel)
+        with open(path, "wb") as f:
+            f.write(data)
+    out = (r.stdout + r.stderr).strip()
+    if r.returncode != 0:
+        raise RuntimeError("git pull failed (%s): %s%s" % (before, out[-400:],
+                                                           ("; " + "; ".join(notes)) if notes else ""))
+    log("git pull: %s -> %s%s" % (before, after, ("  (" + "; ".join(notes) + ")") if notes else ""))
+    return "%s -> %s%s" % (before, after, ("  (" + "; ".join(notes) + ")") if notes else "")
 
 
 def copy_eval_logs(s):
