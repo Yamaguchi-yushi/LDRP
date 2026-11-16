@@ -29,6 +29,7 @@ ssh で届かないマシン (黒) は共有フォルダ (collect_config.yaml �
 """
 
 import argparse
+import contextlib
 import datetime
 import glob
 import hashlib
@@ -311,6 +312,8 @@ def host_state(h, dash, led, matched=None):
     for x in led:
         if x.get("kind") != "train" or x.get("host") != label:
             continue
+        if x.get("killed"):             # 手で止めたジョブ (台帳に killed を書いたもの) は数えない
+            continue
         run = (matched or {}).get(x.get("job"))
         if run is None:
             age = (now_utc() - parse_dt(x.get("at"))).total_seconds()
@@ -483,7 +486,8 @@ def mem_growth(st, recs_by_job, db):
     今の空き (mem_free_mb) からこれを引いたものが、本当に使ってよい空き。
     """
     total = 0.0
-    for job in st.get("our_jobs") or []:
+    # 1 つのジョブに依頼を順番に並べたもの (q19+q20 など) は同じ job が 2 回入るので、1 回だけ数える
+    for job in sorted(set(st.get("our_jobs") or [])):
         rec = recs_by_job.get(job)
         if rec is None:
             continue
@@ -1143,33 +1147,13 @@ def _tick(dry_run, say):
             if r is not None:
                 r["note"] = "%s: %s" % (st["label"], str(e.get("error"))[:300])
 
-    # --- 並べる: 長い連鎖 (学習 + 続く評価) から ---
-    def est(u, label):
-        if u["kind"] == "train":
-            sec = train_sec(rates, label, u["rec"])
-            if u["req"].get("then_eval"):
-                sec += 12 * EVAL_SEC_PER_COND
-            return sec
-        return sum(j["n_cond"] for j in u["jobs"]) * EVAL_SEC_PER_COND / float(next(
-            (h.get("eval_speed") or 1.0) for h in hosts if h["label"] == label))
+    # 順番: 依頼の並び (queue.json の順 = 頼んだ順。`autorun.py move` で並べ替えられる) のまま。
+    # 前は「長いものから」並べ、先のマシンの枠まで押さえていたが、2026-11-16 から
+    # 「今空いている枠に、先頭から入るものを入れる」だけにした (下の割り当てを参照)
+    rank = {}                                   # まだ投入していない依頼の中での順位 (表示用)
     for u in units:
-        u["prio"] = max(est(u, h["label"]) for h in hosts)
-    # 長いものから先に枠を選ぶ。series の依頼は入れた順 (1 本ずつ順番に回すので、頼んだ順を守る)
-    units.sort(key=lambda u: (-u["prio"], "") if not u["req"].get("series")
-               else (0.0, u["req"].get("created") or ""))
+        rank.setdefault(u["req"]["id"], len(rank) + 1)
 
-    # 空き: 学習スロットごとの空く時刻
-    free_at = {}
-    for h in hosts:
-        st = states[h["label"]]
-        busy = sorted(st["train_eta"])
-        cap = int(h.get("max_train") or 0)
-        if cap <= 0:
-            free_at[h["label"]] = []
-        elif len(busy) >= cap:                  # k 番目の枠が空くのは、len(busy)-cap+k 本目が終わったとき
-            free_at[h["label"]] = busy[len(busy) - cap:]
-        else:
-            free_at[h["label"]] = [now_utc()] * (cap - len(busy)) + busy
     eval_free = dict((h["label"], max(0, int(h.get("max_eval") or 0) - states[h["label"]]["n_eval"])) for h in hosts)
     n_train = dict((h["label"], len(states[h["label"]]["train_eta"])) for h in hosts)   # 今動いている学習の本数
 
@@ -1195,87 +1179,111 @@ def _tick(dry_run, say):
                 run is None and (now_utc() - parse_dt(x["at"])).total_seconds() < grace_of(x)):
             busy_series.add(sname)
     launched_any = False
+    max_wait = float(conf.get("autorun_max_wait_hours") or 12) * 3600
+    kept = {}                   # マシン -> 依頼 id。長く待っている依頼のために取っておく (後ろの依頼を入れない)
+    order_l = [x["label"] for x in hosts]
+
+    def cannot_start(h, u):
+        """このマシンで今すぐ始められないなら、その理由 (短い文字列)。始められるなら None."""
+        lab = h["label"]
+        st_h = states[lab]
+        cap = int(h.get("max_train") or 0)
+        if n_train[lab] >= cap:
+            return "full %d/%d" % (n_train[lab], cap)
+        # アルゴリズムごとの上限 (max_train_by_algo: {qmix: 1} など)。QMIX は 1 本でメモリを多く使う
+        algo = str((u["rec"].get("cfg") or {}).get("name") or "").lower()
+        cap_a = (h.get("max_train_by_algo") or {}).get(algo)
+        if cap_a is not None and st_h["n_train_algo"].get(algo, 0) >= int(cap_a):
+            return "%s %d/%d" % (algo, st_h["n_train_algo"].get(algo, 0), int(cap_a))
+        fp = host_footprint(h, u["rec"], fpdb)
+        # trust_max_train: true の host は空きの見積もりを見ず、max_train の本数だけで決める
+        # (黒・M2 は MAPPO を 2 本確実に回せるが、見積もり (1 本 9.5 コア) では 1 本も入らないため)
+        if not h.get("trust_max_train") and not fits(st_h, fp, h):
+            if st_h["cpu_free"] is not None and st_h["cpu_free"] < fp["cpu"]:
+                return "cpu %.1f free < %.1f" % (st_h["cpu_free"], fp["cpu"])
+            if st_h["mem_free_mb"] is not None and st_h["mem_free_mb"] < fp["mem"]:
+                return "memory %.1f GB free < %.1f" % (st_h["mem_free_mb"] / 1024, fp["mem"] / 1024)
+            return "gpu memory"
+        # 他の人と共有のマシンでは、動いている学習がこれから増やす分も先に取っておき、さらに
+        # mem_reserve_mb を残す (他の人の学習が増えても落ちないように)
+        if st_h.get("mem_free_mb") is not None and h.get("mem_reserve_mb") is not None:
+            room = (st_h["mem_free_mb"] - mem_growth(st_h, recs_by_job, fpdb) - fp["mem"]
+                    - float(h["mem_reserve_mb"]))
+            if room < 0:
+                return "memory short by %.1f GB" % (-room / 1024)
+        elif h.get("mem_reserve_mb") is not None:
+            return "free memory unknown"        # 空きが測れていないときは入れない
+        # 他の人が GPU を使っている (使用率が高い) ときは今は入れない (CPU だけで学習するなら見ない)
+        gutil, umax = st_h.get("gpu_util"), h.get("max_gpu_util")
+        if umax is not None and gutil is not None and gutil > float(umax) and not cpu_only(h, u["rec"]):
+            return "gpu busy %d%%" % gutil
+        if lab in shared and n_auto >= total_cap:
+            return "autorun total %d/%d" % (n_auto, total_cap)
+        return None
+
     for u in units:
         allowed = [h for h in hosts if states[h["label"]]["reachable"]
                    and (not u["req"].get("machines") or h["label"] in u["req"]["machines"])]
         if u["kind"] == "train" and u["req"].get("series") in busy_series:
             continue
         if u["kind"] == "train":
-            cands = []
+            allowed = [h for h in allowed if int(h.get("max_train") or 0) > 0]    # 学習しないマシン (白) は除く
+            # --- 割り当て (2026-11-16〜): 依頼の順番どおりに、今空いている枠へ入れる ---
+            # 先頭の依頼が今どこにも入らなければ (メモリが足りない・枠が埋まっている)、後ろの依頼で
+            # 入るものを先に入れる。先のマシンの枠を押さえて待つことはしない。
+            # ただし autorun_max_wait_hours (既定 12 時間) 以上待った依頼には、いちばん早く空きそうな
+            # マシンを 1 台取っておき、後ろの依頼でそのマシンを埋めない (後回しにされ続けないように)
+            rid = u["req"]["id"]
+            ok, why = [], {}
             for h in allowed:
-                if not free_at[h["label"]]:
-                    continue
-                start = free_at[h["label"]][0]
-                fin = max(start, now_utc()) + datetime.timedelta(seconds=train_sec(rates, h["label"], u["rec"]))
-                if start <= now_utc():
-                    # 今すぐ入れる枠なら、1 本が使う量がマシンの空きに収まるかを見る (収まらなければ今は入れない)
-                    # アルゴリズムごとの上限 (max_train_by_algo: {qmix: 1} など)。QMIX は 1 本でメモリを多く使う
-                    algo = str((u["rec"].get("cfg") or {}).get("name") or "").lower()
-                    cap_a = (h.get("max_train_by_algo") or {}).get(algo)
-                    if cap_a is not None and states[h["label"]]["n_train_algo"].get(algo, 0) >= int(cap_a):
-                        continue
-                    # trust_max_train: true の host は空きの見積もりを見ず、max_train の本数だけで決める
-                    # (黒・M2 は MAPPO を 2 本確実に回せるが、見積もり (1 本 9.5 コア) では 1 本も入らないため)
-                    if (not h.get("trust_max_train")
-                            and not fits(states[h["label"]], host_footprint(h, u["rec"], fpdb), h)):
-                        continue
-                    # 他の人と共有のマシンでは、動いている学習がこれから増やす分も先に取っておき、さらに
-                    # mem_reserve_mb を残す (他の人の学習が増えても落ちないように)
-                    st_h = states[h["label"]]
-                    if st_h.get("mem_free_mb") is not None and h.get("mem_reserve_mb") is not None:
-                        room = (st_h["mem_free_mb"] - mem_growth(st_h, recs_by_job, fpdb)
-                                - host_footprint(h, u["rec"], fpdb)["mem"] - float(h["mem_reserve_mb"]))
-                        if room < 0:
-                            say("[autorun] %s: %s skipped, not enough memory for the full run "
-                                "(short by %.1f GB, keeping %.0f GB for others)"
-                                % (u["req"]["id"], h["label"], -room / 1024, float(h["mem_reserve_mb"]) / 1024))
-                            continue
-                    elif h.get("mem_reserve_mb") is not None:
-                        continue                    # 空きが測れていないときは入れない
-                    # 他の人が GPU を使っている (使用率が高い) ときは今は入れない (CPU だけで学習するなら見ない)
-                    gutil, umax = states[h["label"]].get("gpu_util"), h.get("max_gpu_util")
-                    if (umax is not None and gutil is not None and gutil > float(umax)
-                            and not cpu_only(h, u["rec"])):
-                        continue
-                    if h["label"] in shared and n_auto >= total_cap:
-                        say("[autorun] %s: %s skipped, %d training run(s) by autorun already on shared machines "
-                            "(autorun_max_train_total=%d)" % (u["req"]["id"], h["label"], n_auto, total_cap))
-                        continue
-                cands.append((h, fin, start))
-            if not cands:
+                r = cannot_start(h, u)
+                if r is None and kept.get(h["label"], rid) != rid:
+                    r = "kept for %s" % kept[h["label"]]
+                if r is None:
+                    ok.append(h)
+                else:
+                    why[h["label"]] = r
+            if not ok:
+                since = parse_dt(u["req"].get("blocked_since"))
+                if since is None:
+                    since = now_utc()
+                    if not dry_run:
+                        u["req"]["blocked_since"] = since.isoformat()
+                waited = (now_utc() - since).total_seconds()
+                if waited >= max_wait and rid not in kept.values():
+                    # 空になっても入らないマシン (動いている学習が 0 本) は取っておいても無駄なので除く
+                    cand = [h for h in allowed if h["label"] not in kept and n_train[h["label"]] > 0
+                            and not str(why.get(h["label"], "")).startswith("gpu busy")]
+                    if cand:
+                        hk = min(cand, key=lambda h: (min(states[h["label"]]["train_eta"]),
+                                                      order_l.index(h["label"])))
+                        kept[hk["label"]] = rid
+                        why[hk["label"]] += " (kept for this request)"
+                msg = "; ".join("%s: %s" % kv for kv in why.items()) or "no allowed machine is reachable"
+                if waited >= 3600:
+                    msg += "  [waiting %.0f h]" % (waited / 3600)
+                if not dry_run:
+                    u["req"]["wait_reason"] = msg
+                say("[autorun] %s waits (#%d in queue)  %s" % (rid, rank.get(rid, 0), msg))
                 continue
-            # 今すぐ入れられるマシンのうち最も優先度の高い段 (top) と、それより優先度の高いマシンの「後で空く枠」
-            # の中から、終わる時刻が最も早いものを選ぶ。黒 (train_priority 0) が空いていれば黒、黒が埋まって
-            # いても黒で待つほうが早く終わるなら待つ、そうでなければ GPU マシン (1) に入れる
-            # = 学習が多くて黒だけでは遅くなるときだけ GPU マシンも使う
-            # 同じ段に今すぐ入れられるマシンが複数あるときは、動いている学習が少ないマシンへ (同数なら設定ファイルで
-            # 先に書かれたマシン)。黒と M2 を同じ段にすると 黒 1 → M2 1 → 黒 2 の順に埋まる
-            # (MAPPO の CPU 学習は 1 本で多くのコアを使うので、1 台に 2 本より 2 台に 1 本ずつのほうが速い)
-            now_c = [c for c in cands if c[2] <= now_utc()]
-            if now_c:
-                top = min(prio(c[0], "train_priority") for c in now_c)
-                order = [x["label"] for x in hosts]
-                best = min((c for c in now_c if prio(c[0], "train_priority") == top),
-                           key=lambda c: (n_train[c[0]["label"]], order.index(c[0]["label"]), c[1]))
-                # それより優先度の高いマシンで待つほうが早く終わるなら待つ (今までどおり)
-                cands = [best] + [c for c in cands if prio(c[0], "train_priority") < top]
-            h, fin, start = min(cands, key=lambda c: c[1])
-            free_at[h["label"]].pop(0)
-            if start > now_utc():                       # 速いマシンが空くのを待つほうが早く終わる
-                free_at[h["label"]].append(fin)
-                free_at[h["label"]].sort()
-                say("[autorun] %s waits for %s (free %s, finish %s)" % (u["req"]["id"], h["label"],
-                                                                      fmt_dt(start), fmt_dt(fin)))
-                continue
+            # 入れられるマシンが複数あれば、優先度の高い段 (train_priority が小さい) → 動いている学習が
+            # 少ないマシン → 設定ファイルで先に書かれたマシンの順。黒と M2 を同じ段にすると
+            # 黒 1 → M2 1 → 黒 2 の順に埋まる (MAPPO の CPU 学習は 1 台に 2 本より 2 台に 1 本ずつのほうが速い)
+            top = min(prio(x, "train_priority") for x in ok)
+            h = min((x for x in ok if prio(x, "train_priority") == top),
+                    key=lambda x: (n_train[x["label"]], order_l.index(x["label"])))
+            fin = now_utc() + datetime.timedelta(seconds=train_sec(rates, h["label"], u["rec"]))
             try:
                 info = launch_train(h, u["req"], u["cond"], u["rec"], conf, dry_run)
             except Exception as e:
                 u["req"]["note"] = str(e)[:300]
-                say("[autorun] %s: cannot launch on %s: %s" % (u["req"]["id"], h["label"], e))
+                say("[autorun] %s: cannot launch on %s: %s" % (rid, h["label"], e))
                 continue
-            free_at[h["label"]].append(fin)
-            free_at[h["label"]].sort()
+            if not dry_run:
+                u["req"].pop("blocked_since", None)
+                u["req"].pop("wait_reason", None)
             n_train[h["label"]] += 1
+            states[h["label"]]["train_eta"].append(fin)
             if u["req"].get("series"):
                 busy_series.add(u["req"]["series"])
             na = states[h["label"]]["n_train_algo"]
@@ -1286,13 +1294,13 @@ def _tick(dry_run, say):
             fp = host_footprint(h, u["rec"], fpdb)
             take(states[h["label"]], fp)
             say("[autorun] %s train %s on %s  (est. finish %s; needs %.1f cores, %.1f GB RAM, %.1f GB GPU%s)%s" % (
-                u["req"]["id"], cond_text(u["cond"]), h["label"], fmt_dt(fin), fp["cpu"], fp["mem"] / 1024,
+                rid, cond_text(u["cond"]), h["label"], fmt_dt(fin), fp["cpu"], fp["mem"] / 1024,
                 fp["gpu"] / 1024, ", measured" if fp.get("measured") else ", estimated",
                 "  [dry-run]" if dry_run else ""))
             if dry_run:
                 say("    $ " + info["cmd"])
             else:
-                ledger_add({"kind": "train", "req": u["req"]["id"], "host": h["label"], "cond": u["cond"]["id"],
+                ledger_add({"kind": "train", "req": rid, "host": h["label"], "cond": u["cond"]["id"],
                             "job": info["job"], "cmd": info["cmd"], "code": info.get("code"),
                             "est_sec": (fin - now_utc()).total_seconds(),
                             "grace": DROP_GRACE_SEC if h.get("drop") else LAUNCH_GRACE_SEC})
@@ -1551,6 +1559,51 @@ def add_requests(kind, conds, n=1, then_eval=False, machines=None, arrivals=None
     return made
 
 
+@contextlib.contextmanager
+def queue_lock():
+    """依頼の一覧 (queue.json) を書き換えるコマンド同士 (tick・add・cancel・move) を 1 つずつにする.
+
+    tick は数分かかり、その間に add / cancel すると、tick が最後に古い一覧で上書きして変更が消える
+    (2026-11-14 に起きた)。fcntl.flock は同じファイルを開いた別プロセスとの排他。プロセスが落ちれば自動で外れる。
+    """
+    import fcntl
+    os.makedirs(STATE, exist_ok=True)
+    f = open(os.path.join(STATE, "queue.lock"), "w")
+    try:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("waiting for another autorun command (probably a tick) to finish ...", flush=True)
+            fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(f, fcntl.LOCK_UN)
+        f.close()
+
+
+def move_requests(ids, where, ref=None):
+    """依頼を並べ替える. where = top / bottom / before / after (before・after は ref の依頼の前・後)."""
+    q = load_queue()
+    by = dict((r["id"], r) for r in q)
+    bad = [i for i in list(ids) + ([ref] if ref else []) if i not in by]
+    if bad:
+        raise ValueError("unknown request id: %s" % ", ".join(bad))
+    moving = [by[i] for i in ids]
+    rest = [r for r in q if r["id"] not in ids]
+    if where == "top":
+        opens = [i for i, r in enumerate(rest) if r.get("status") == "open"]
+        pos = opens[0] if opens else len(rest)
+    elif where == "bottom":
+        pos = len(rest)
+    else:
+        if ref in ids:
+            raise ValueError("%s is one of the requests being moved" % ref)
+        pos = next(i for i, r in enumerate(rest) if r["id"] == ref) + (1 if where == "after" else 0)
+    q = rest[:pos] + moving + rest[pos:]
+    save_json(QUEUE, q)
+    return [r for r in q if r.get("status") == "open"]
+
+
 def cancel_requests(ids):
     if is_client():
         send_request({"op": "cancel", "ids": list(ids)})
@@ -1704,6 +1757,8 @@ def cmd_status(args):
                 r["id"], r["status"], len(mine), r["count"], " +eval" if r.get("then_eval") else "", r.get("cond_text")))
             if parts:
                 print("    " + ", ".join(parts) + ("   finish ~%s" % fmt_dt(max(etas)) if etas else ""))
+            if r.get("wait_reason") and r["status"] == "open" and len(mine) < r["count"]:
+                print("    waits: %s" % r["wait_reason"])
         else:
             models = sorted(set(m for x in mine for m in x.get("models") or []))
             done_c = sum(1 for m in models for k in finished if k[0] == m)
@@ -1714,6 +1769,39 @@ def cmd_status(args):
         if r.get("note"):
             print("    note: %s" % r["note"])
     return 0
+
+
+def cmd_order(args):
+    """まだ投入していない依頼を、投入する順に出す (投入済みのものは status で見る)."""
+    led = ledger()
+    q = []
+    for r in load_queue():
+        if r.get("status") != "open":
+            continue
+        n = sum(1 for x in led if x.get("req") == r["id"] and x.get("kind") == r["kind"])
+        if r["kind"] == "train" and n >= r["count"]:
+            continue
+        q.append((r, n))
+    if not q:
+        print("no request is waiting to be launched.")
+        return 0
+    for i, (r, n) in enumerate(q, 1):
+        state = ("%d/%d launched" % (n, r["count"])) if r["kind"] == "train" else "eval"
+        mach = (" only " + ",".join(r["machines"])) if r.get("machines") else ""
+        print("#%-3d %-4s %-14s %s%s" % (i, r["id"], state, r.get("cond_text") or "", mach))
+        if r.get("wait_reason") and (r["kind"] != "train" or n < r["count"]):
+            print("            waits: %s" % r["wait_reason"])
+    return 0
+
+
+def cmd_move(args):
+    where = "top" if args.top else "bottom" if args.bottom else "before" if args.before else "after"
+    try:
+        move_requests(args.ids, where, args.before or args.after)
+    except ValueError as e:
+        print(e)
+        return 1
+    return cmd_order(args)
 
 
 def cmd_cancel(args):
@@ -1815,6 +1903,14 @@ def main(argv=None):
     s.add_argument("--all", action="store_true", help="include finished / cancelled requests")
     c = sub.add_parser("cancel", help="cancel requests (launched runs keep running)")
     c.add_argument("ids", nargs="+")
+    sub.add_parser("order", help="show open requests in the order they are launched")
+    m = sub.add_parser("move", help="change the order of requests (launch earlier / later)")
+    m.add_argument("ids", nargs="+")
+    mg = m.add_mutually_exclusive_group(required=True)
+    mg.add_argument("--top", action="store_true", help="move to the front")
+    mg.add_argument("--bottom", action="store_true", help="move to the end")
+    mg.add_argument("--before", metavar="ID", help="put just before this request")
+    mg.add_argument("--after", metavar="ID", help="put just after this request")
     sub.add_parser("hosts", help="show machines and free slots")
     g = sub.add_parser("pull", help="make shared-folder machines (e.g. 黒, M2) run git pull --ff-only")
     g.add_argument("machines", nargs="*", help="host labels (default: all shared-folder machines)")
@@ -1827,8 +1923,19 @@ def main(argv=None):
 
     if args.cmd == "find":
         return cmd_find(args)
+    if args.cmd in ("add", "cancel", "move") or (args.cmd == "tick" and not args.dry_run):
+        with queue_lock():
+            return _main_locked(args)
+    if args.cmd == "order":
+        return cmd_order(args)
+    return _main_locked(args)
+
+
+def _main_locked(args):
     if args.cmd == "add":
         return cmd_add(args)
+    if args.cmd == "move":
+        return cmd_move(args)
     if args.cmd == "status":
         return cmd_status(args)
     if args.cmd == "cancel":

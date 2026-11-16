@@ -1,20 +1,32 @@
 # 実験の自動実行 (tools/autorun.py) — 使い方とセットアップ
 
-「この条件を 2 本学習して」「この条件を評価して」と依頼すると、空いているマシンに順番を最適化して投入する仕組み。
+「この条件を 2 本学習して」「この条件を評価して」と依頼すると、依頼の順番どおりに、空いたマシンへ投入していく仕組み。
 LLM は使わない (投入・順番決め・監視は `autorun.py` が行う)。自然言語で頼みたいときは Claude Code の
 subagent `experiment-runner` が窓口になり、依頼を `autorun.py` のコマンドに直す。
 
 - 設計 (なぜこの作りか): [design/auto_runner.md](../design/auto_runner.md)
 - 学習の収集・ダッシュボード: [README.md](README.md)
 
-## 目次
+<!-- toc -->
+
+**目次**
 
 - [1. 役割](#1-役割)
+  - [1.1 学習の割り当て方 (2026-11-16〜)](#11-学習の割り当て方-2026-11-16)
 - [2. 依頼の出し方 (どのマシンからでも同じ)](#2-依頼の出し方-どのマシンからでも同じ)
 - [3. 司令塔 (白) のセットアップ](#3-司令塔-白-のセットアップ)
 - [4. 共有フォルダ経由のマシン (黒) のセットアップ](#4-共有フォルダ経由のマシン-黒-のセットアップ)
+  - [4.0 前提](#40-前提)
+  - [4.1 このマシンの設定を書く](#41-このマシンの設定を書く)
+  - [4.2 1 回だけ手で動かす](#42-1-回だけ手で動かす)
+  - [4.3 5 分ごとに回す](#43-5-分ごとに回す)
+  - [4.4 白から見えたか確かめる](#44-白から見えたか確かめる)
+  - [4.5 依頼役として使う](#45-依頼役として使う)
+  - [4.6 更新のしかた](#46-更新のしかた)
 - [5. 設定のキー](#5-設定のキー)
 - [6. 困ったとき](#6-困ったとき)
+
+<!-- /toc -->
 
 ---
 
@@ -45,6 +57,25 @@ subagent `experiment-runner` が窓口になり、依頼を `autorun.py` のコ�
 - **学習の優先順位**: 黒 (占有できる) を先に埋め、埋まったときだけ GPU1 / GPU2 に回す。GPU は他の人と共有なので、autorun が GPU 機で同時に動かす学習は全体で `autorun_max_train_total` 本 (既定 2) まで
 - **評価**: CPU だけで回す (GPU 機でも `CUDA_VISIBLE_DEVICES=""`)
 
+### 1.1 学習の割り当て方 (2026-11-16〜)
+
+```text
+依頼の順番 (頼んだ順。move で並べ替え)      tick (15 分ごと)
+  #1 q43 ──┐
+  #2 q33 ──┼─► 先頭から順に「今、空いている枠に入るか」を見る
+  #3 q34 ──┘     入る   → 入るマシンのうち 優先度の段 → 動いている本数が少ない → 設定で先 のマシンへ投入
+                 入らない → 理由を残して次の依頼へ (後ろの依頼が先に入ってよい)
+```
+
+- **マシンは前もって決めない**。どのマシンも、空いた時点で、順番がいちばん前の「そこに入る依頼」を取る
+- 「入らない」の理由: 枠が埋まっている (`full 4/4`)・アルゴリズムの上限 (`qmix 1/1`)・メモリや CPU が足りない・
+  GPU が使われている・共有マシン全体の上限 (`autorun total`)・`--machines` で外されている。`status` / `order` の `waits:` 行に出る
+- **後回しにされ続けない工夫**: `autorun_max_wait_hours` (既定 12 時間) 以上入れずにいる依頼には、その依頼が使えるマシンのうち
+  いちばん早く空きそうな 1 台を取っておく (`kept for qNN`)。取っておいたマシンには、後ろの依頼を入れない。
+  空になっても入らないマシン (学習 0 本なのに入らない) は取っておかない
+- 依頼の一覧を書き換えるコマンド (`tick`・`add`・`cancel`・`move`) は 1 つずつ動く (ロック)。tick の最中に add すると、
+  `waiting for another autorun command ...` と出て tick が終わるのを待つ (前は tick が古い一覧で上書きして add が消えることがあった)
+
 ## 2. 依頼の出し方 (どのマシンからでも同じ)
 
 Claude Code で自然言語で頼む (「aoba00 7 台の 8x5_5→aoba00_5 10M を 2 本学習して」「実験の状況は」) と、
@@ -58,7 +89,9 @@ python tools/autorun.py add eval <id> [<id> ...]                        # done �
 python tools/autorun.py add train <id> -n 1 --machines 黒               # 回すマシンを指定
 python tools/autorun.py add train <id> -n 1 --like <id2> --lare-model QMIX_PATH_....pth
                                     # 実績の無い条件 (新しい LaRe モデル) を、条件 id2 の run の設定で LaRe モデルだけ替えて学習
-python tools/autorun.py status                                          # 依頼ごとの進み具合
+python tools/autorun.py status                                          # 依頼ごとの進み具合 (入れない依頼は waits: に理由)
+python tools/autorun.py order                                           # まだ投入していない依頼を、投入する順に
+python tools/autorun.py move q43 --top                                  # 順番を変える (--top / --bottom / --before qNN / --after qNN)
 python tools/autorun.py hosts                                           # マシンごとの空き
 python tools/autorun.py cancel q3                                       # 取り消し (動いている run は止めない)
 python tools/autorun.py pause | resume                                  # 新しい投入を止める / 再開
@@ -174,7 +207,11 @@ tail ~/.ldrp/autorun/worker.log                                           # 動�
 |---|---|
 | `enabled` | `true` のマシンにだけ投入する |
 | `max_train` / `max_eval` | 同時に回す学習・評価の本数の上限 (手で回したものも含めて数える) |
-| `train_priority` / `eval_priority` | 優先順位。小さいほど先に埋める (既定 0)。同じ段の中では終わる時刻が早いマシン |
+| `train_priority` / `eval_priority` | 優先順位。依頼が入れるマシンが複数あるとき、小さいほうへ入れる (既定 0)。同じ段の中では動いている学習が少ないマシン |
+| `max_train_by_algo` | 例 `{qmix: 1}`。アルゴリズムごとの同時本数の上限 |
+| `trust_max_train` | `true` = 空きの見積もり (CPU・メモリ) を見ず、`max_train` の本数だけで決める |
+| `mem_reserve_mb` | 動いている学習が最後まで膨らんだ後でも、これだけメモリを残す (共有マシン用) |
+| `autorun_max_wait_hours` (トップレベル) | これ以上入れずにいる依頼には、マシンを 1 台取っておく (既定 12) |
 | `shared` | `true` = 他の人と共有のマシン。学習が `autorun_max_train_total` (トップレベル) の上限に数えられる |
 | `gpu_mem_per_train_mb` / `max_gpu_util` | GPU の空きメモリが足りない・使用率が高いときは学習を入れない |
 | `cpu_algos` | 例 `[mappo]`。このアルゴリズムの学習は GPU を見せずに (`CUDA_VISIBLE_DEVICES=""` を付けて) CPU で回す。GPU の空き・使用率の判定もしない。2026-11-12 から GPU1 / GPU2 で MAPPO に一時的に設定中 |
