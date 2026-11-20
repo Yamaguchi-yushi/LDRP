@@ -126,6 +126,8 @@ python tools/autorun.py order                                           # まだ
 python tools/autorun.py move q43 --top                                  # 順番を変える (--top / --bottom / --before qNN / --after qNN)
 python tools/autorun.py hosts                                           # マシンごとの空き
 python tools/autorun.py cancel q3                                       # 取り消し (動いている run は止めない)
+python tools/autorun.py stop q49 [--machines 黒]                        # q49 で起動した評価を止める (動いている test.py は最後まで走り、次のモデルに進まない)
+                                                                        #   黒・M2 は worker が 5 分以内に止める (結果は共有フォルダの started/stop_*.json)
 python tools/autorun.py pause | resume                                  # 新しい投入を止める / 再開
 python tools/autorun.py pull [黒 M2]                                    # 共有フォルダのマシンに git pull --ff-only させる (5 分以内)
 python tools/autorun.py pull --check                                    # その結果 (前 -> 後のコミット、失敗の理由)

@@ -957,6 +957,8 @@ def launch_eval(h, req, jobs, n_par, dry_run):
                 if not EV.place(src, os.path.join(h["eval_repo"], rel), j["name"]):
                     raise RuntimeError("a different file named %s is already in %s" % (j["name"], rel))
             else:
+                # rsync は置き場の親フォルダまでは作らない (models/safe/ が無いマシンで失敗する)
+                run_on(h, "mkdir -p %s" % shlex.quote("%s/%s" % (h["eval_repo"], rel)))
                 rsync_to(h, [src], "%s/%s/" % (h["eval_repo"], rel))
     payload = [dict(j, files=[]) for j in jobs]
     rc, _, err = run_on(h, "mkdir -p ~/%s/jobs && cat > ~/%s/jobs/%s.json" % (REMOTE_DIR, REMOTE_DIR, job_id),
@@ -2082,6 +2084,41 @@ def cmd_pull(args):
     return 0
 
 
+def cmd_stop(args):
+    """評価の依頼 (qN) で起動した評価を止める. 親 (eval_lare_factor.py) だけを止め、動いている test.py は最後まで走らせる.
+
+    共有フォルダのマシン (黒・M2) は inbox に stop の指示を置き、worker が次に動いたとき (5 分おき) に止める。
+    ssh のマシン (GPU1・GPU2) はその場で止める。依頼そのものは残るので、要らなければ cancel も行う。
+    """
+    if is_client():
+        print("stop works only on the commander")
+        return 1
+    hosts = dict((h["label"], h) for h in hosts_of(load_conf()))
+    jobs = [x for x in ledger() if x.get("kind") == "eval" and x.get("req") in args.ids
+            and (not args.machines or x.get("host") in args.machines)]
+    if not jobs:
+        print("no evaluation launched for %s" % ", ".join(args.ids))
+        return 1
+    for x in jobs:
+        h = hosts.get(x.get("host"))
+        if h is None:
+            print("%s: unknown host %s" % (x["job"], x.get("host")))
+            continue
+        if h.get("drop"):
+            sid = "stop_%s_%s" % (h["label"], time.strftime("%m%d%H%M%S"))
+            drop_put(h, "inbox", sid + ".json", {"id": sid, "kind": "stop", "target": x["job"], "host": h["label"]})
+            print("%s on %s: stop is queued (%s). The worker runs it within ~5 min; the result is in "
+                  "started/%s.json" % (x["job"], h["label"], sid, sid))
+        else:
+            # 先頭が python の行だけ (この命令自身のシェル・awk の行は外れる)。
+            # 親だけに SIGTERM を送るので子の test.py は走り続ける
+            cmd = ("ps -eo pid=,args= | awk '$2 ~ /python/ && /eval_lare_factor[.]py/ && /jobs\\/%s[.]json/ {print $1}'"
+                   " | xargs -r kill -TERM; echo done" % x["job"])
+            rc, out, err = run_on(h, cmd)
+            print("%s on %s: %s" % (x["job"], h["label"], "SIGTERM sent" if rc == 0 else "failed: " + err.strip()))
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="Run LDRP training / evaluation requests on several machines.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2125,6 +2162,10 @@ def main(argv=None):
     g = sub.add_parser("pull", help="make shared-folder machines (e.g. 黒, M2) run git pull --ff-only")
     g.add_argument("machines", nargs="*", help="host labels (default: all shared-folder machines)")
     g.add_argument("--check", action="store_true", help="show the result of the last pull instead")
+    st = sub.add_parser("stop", help="stop evaluations launched for these requests (running test.py runs finish)")
+    st.add_argument("ids", nargs="+")
+    st.add_argument("--machines", type=lambda s: [x for x in s.split(",") if x], default=None,
+                    help="only these hosts (comma separated)")
     sub.add_parser("pause", help="stop launching new jobs")
     sub.add_parser("resume", help="resume launching")
     t = sub.add_parser("tick", help="launch what can be launched now")
@@ -2154,6 +2195,8 @@ def _main_locked(args):
         return cmd_hosts(args)
     if args.cmd == "pull":
         return cmd_pull(args)
+    if args.cmd == "stop":
+        return cmd_stop(args)
     if args.cmd == "pause":
         set_pause(True)
         print(("sent to the commander: " if is_client() else "") + "paused. running jobs are not touched.")

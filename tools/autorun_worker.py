@@ -6,6 +6,8 @@ launchd から 5 分おきに 1 回ずつ呼ぶ (登録: python tools/autorun_wo
        train: 添付の LaRe モデルを train_repo に置き、autorun_train.py で epymarl を起動 (Mac ではスリープ防止つき)
        eval : コードの束を eval_repo に展開し (中身が変わったときだけ)、方策モデルを置いて
               tools/eval_lare_factor.py を CPU で起動
+       pull : train_repo で git pull --ff-only
+       stop : 評価のジョブ target の親 (eval_lare_factor.py) を止める (動いている test.py は最後まで走る)
   2. eval_repo/logs/ の *.txt を共有フォルダの eval_logs/ に写す (司令塔の collect が手元の logs/ に取り込む)
   3. このマシンの空き具合などを status.json に書く (司令塔はこれを ssh の代わりに読む)
 
@@ -191,6 +193,8 @@ def take_jobs(s):
             kind = job.get("kind")
             if kind == "pull":
                 job["result"] = git_pull(s)
+            elif kind == "stop":
+                job["result"] = stop_eval(job["target"])
             else:
                 (start_train if kind == "train" else start_eval)(s, job)
             job["started_at"] = AR.now_utc().isoformat()
@@ -205,6 +209,35 @@ def take_jobs(s):
     with open(ERRORS, "w") as f:
         json.dump(errors, f, ensure_ascii=False)
     return errors
+
+
+def stop_eval(target):
+    """評価のジョブ target (例 q49_黒_11201725) の親 (tools/eval_lare_factor.py) に SIGTERM を送る (司令塔の `autorun.py stop`).
+
+    親だけを止めるので、動いている test.py (子) は最後まで走ってログに [RESULT] を書く。次のモデルには進まない。
+    学習のジョブは対象外 (autorun_train.py を止めても学習本体が残るため)。
+    """
+    p = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, errors="replace")
+    key = "jobs/%s.json" % target
+    pids = []
+    for line in p.stdout.splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        tok = parts[1].split()
+        # 先頭が python で、引数に eval_lare_factor.py とこのジョブのファイルがあるものだけ
+        # (caffeinate は中の python が終われば一緒に終わる。シェルの行は先頭が sh・zsh なので外れる)
+        if not (os.path.basename(tok[0]).startswith("python")
+                and any(t.endswith("eval_lare_factor.py") for t in tok)
+                and any(t.endswith(key) for t in tok)):
+            continue
+        if int(parts[0]) != os.getpid():
+            pids.append(int(parts[0]))
+    if not pids:
+        return "no running evaluation for %s" % target
+    for pid in pids:
+        os.kill(pid, 15)
+    return "sent SIGTERM to %s (running test.py children keep going)" % ", ".join(str(x) for x in pids)
 
 
 # git pull で手元の版を優先するファイル (マシンごとに書き換えて使うもの)。
