@@ -13,6 +13,7 @@ subagent `experiment-runner` が窓口になり、依頼を `autorun.py` のコ�
 
 - [1. 役割](#1-役割)
   - [1.1 学習の割り当て方 (2026-11-16〜)](#11-学習の割り当て方-2026-11-16)
+  - [1.2 白が来ていないときの GPU の控え (2026-11-18〜)](#12-白が来ていないときの-gpu-の控え-2026-11-18)
 - [2. 依頼の出し方 (どのマシンからでも同じ)](#2-依頼の出し方-どのマシンからでも同じ)
 - [3. 司令塔 (白) のセットアップ](#3-司令塔-白-のセットアップ)
 - [4. 共有フォルダ経由のマシン (黒) のセットアップ](#4-共有フォルダ経由のマシン-黒-のセットアップ)
@@ -69,12 +70,40 @@ subagent `experiment-runner` が窓口になり、依頼を `autorun.py` のコ�
 
 - **マシンは前もって決めない**。どのマシンも、空いた時点で、順番がいちばん前の「そこに入る依頼」を取る
 - 「入らない」の理由: 枠が埋まっている (`full 4/4`)・アルゴリズムの上限 (`qmix 1/1`)・メモリや CPU が足りない・
-  GPU が使われている・共有マシン全体の上限 (`autorun total`)・`--machines` で外されている。`status` / `order` の `waits:` 行に出る
+  GPU が使われている・共有マシン全体の上限 (`autorun total`)・`--machines` で外されている・
+  run の収集でつながらなかった (`unreachable`。次の収集でつながれば候補に戻る)。`status` / `order` の `waits:` 行に出る
 - **後回しにされ続けない工夫**: `autorun_max_wait_hours` (既定 12 時間) 以上入れずにいる依頼には、その依頼が使えるマシンのうち
   いちばん早く空きそうな 1 台を取っておく (`kept for qNN`)。取っておいたマシンには、後ろの依頼を入れない。
   空になっても入らないマシン (学習 0 本なのに入らない) は取っておかない
 - 依頼の一覧を書き換えるコマンド (`tick`・`add`・`cancel`・`move`) は 1 つずつ動く (ロック)。tick の最中に add すると、
   `waiting for another autorun command ...` と出て tick が終わるのを待つ (前は tick が古い一覧で上書きして add が消えることがあった)
+
+### 1.2 白が来ていないときの GPU の控え (2026-11-18〜)
+
+白がスリープ・外出していると tick が GPU に届かず、GPU の枠が空いたままになる。そこで GPU には
+「白が来ないときに自分で起動してよい学習」の控えを置いておき、GPU の worker (`tools/autorun_standby.py`) が起動する。
+
+```text
+白の tick (GPU に届くとき)
+  1. GPU の ~/.ldrp/autorun/commander_seen を新しくする (= 白がいる印)
+     GPU が留守の間に自分で起動した記録 (standby_started.jsonl) を台帳に取り込む
+  2. いつもどおり投入する
+  3. まだ入っていない学習の先頭から standby 件を、その GPU の控え (standby.json) に書く
+     1 つのジョブは 1 台の GPU にだけ載せる。worker を GPU に写し、crontab に登録する (登録済みなら何もしない)
+
+GPU の worker (cron 5 分おき)
+  commander_seen が 30 分以上古いときだけ、控えを先頭から見て、今の空き (本数・メモリ・CPU。白と同じ判定) に
+  入る最初の 1 本を起動する。1 回に 1 本
+```
+
+- **二重投入を防ぐしくみ**: 白から届かない GPU の控えに載っているジョブは、控えを書いてから
+  `autorun_standby_lease_hours` (既定 24 時間) のあいだ他のマシンに入れない (`held for the standby of an unreachable GPU`)。
+  GPU 側も期限を過ぎた控えは起動しない。GPU が本当に止まっていても、期限が来れば他のマシンに回る
+- 白と GPU の worker は同じロック (`~/.ldrp/autorun/standby.lock`) を取るので、白が戻った瞬間に両方が同じジョブを入れることはない
+- `pause` 中・依頼が無いときは、控えを空にする。ただし白が届かない間に `pause` / `cancel` しても GPU には伝わらない
+  (控えにあるものは期限まで起動されうる)
+- `order` には `standby on GPU1` のように、どの GPU の控えに載っているかが出る。GPU 側の動きは `~/.ldrp/autorun/standby.log`
+- 黒・M2 は白の tick が共有フォルダに置いたジョブを拾う仕組みなので、白が来ない間は今までどおり新しいジョブは入らない
 
 ## 2. 依頼の出し方 (どのマシンからでも同じ)
 
@@ -89,6 +118,9 @@ python tools/autorun.py add eval <id> [<id> ...]                        # done �
 python tools/autorun.py add train <id> -n 1 --machines 黒               # 回すマシンを指定
 python tools/autorun.py add train <id> -n 1 --like <id2> --lare-model QMIX_PATH_....pth
                                     # 実績の無い条件 (新しい LaRe モデル) を、条件 id2 の run の設定で LaRe モデルだけ替えて学習
+python tools/autorun.py add train <id> -n 1 --like <id2> --set key=drp_env:drp_safe-2agent_map_8x5-v2
+                                    # id2 の設定の env_args を上書きして学習 (台数の違う条件など。--set は何回でも。
+                                    # 値は JSON として読む: 数値・true/false はそのまま、それ以外は文字列。結果が <id> の条件か投入前に検査する)
 python tools/autorun.py status                                          # 依頼ごとの進み具合 (入れない依頼は waits: に理由)
 python tools/autorun.py order                                           # まだ投入していない依頼を、投入する順に
 python tools/autorun.py move q43 --top                                  # 順番を変える (--top / --bottom / --before qNN / --after qNN)
@@ -212,6 +244,8 @@ tail ~/.ldrp/autorun/worker.log                                           # 動�
 | `trust_max_train` | `true` = 空きの見積もり (CPU・メモリ) を見ず、`max_train` の本数だけで決める |
 | `mem_reserve_mb` | 動いている学習が最後まで膨らんだ後でも、これだけメモリを残す (共有マシン用) |
 | `autorun_max_wait_hours` (トップレベル) | これ以上入れずにいる依頼には、マシンを 1 台取っておく (既定 12) |
+| `autorun_standby_lease_hours` (トップレベル) | GPU の控えの期限。この間は控えのジョブを他のマシンに入れない (既定 24) |
+| `standby` (host の autorun:) | 白が来ないときに、その GPU が自分で起動してよい控えの件数 (0 か省略で無効。ssh で届く Linux のマシンだけ) |
 | `shared` | `true` = 他の人と共有のマシン。学習が `autorun_max_train_total` (トップレベル) の上限に数えられる |
 | `gpu_mem_per_train_mb` / `max_gpu_util` | GPU の空きメモリが足りない・使用率が高いときは学習を入れない |
 | `cpu_algos` | 例 `[mappo]`。このアルゴリズムの学習は GPU を見せずに (`CUDA_VISIBLE_DEVICES=""` を付けて) CPU で回す。GPU の空き・使用率の判定もしない。2026-11-12 から GPU1 / GPU2 で MAPPO に一時的に設定中 |
