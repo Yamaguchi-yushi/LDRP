@@ -45,12 +45,13 @@ for i in range(num_runs):
         # LaRe-Path の評価関数の版 (1: DRP の 10 因子 = 既定 / 2: LLM 生成 v1 / 3: LLM 生成 v2)。
         # 版 1 なら書かなくてよい。2・3 は学習済みデコーダが無いので pretrained / finetuning を False にして scratch で回す
         # (design/lare_factor_versions.md §4.4・§8.7)
-        # f'env_args.lare_path_factor_version=2 '
+        f'env_args.lare_path_factor_version=2 '
         f'env_args.use_pretrained_lare_path=False '
         f'env_args.pretrained_lare_path_model_name="FT_QMIX_PATH_Safe_map_8x5_2agents_10.0M_Safe_map_aoba00_2agents_5.0M_checkpoint.pth" '
         f'env_args.use_finetuning_lare_path=False '
         f'env_args.finetuning_lare_path_model_name="QMIX_PATH_Safe_map_aoba00_5agents_10.0M_checkpoint.pth" '
         f'env_args.allow_reassign_before_pickup=False '
+        f'env_args.lare_path_train_start_step={10 * 1_000_000} '
         # --- タスク到着のランダム化 (学習用) ---------------------------------
         # True: エピソード毎に bernoulli(p ランダム) / mmpp を引き直す。
         #       1 つの方策を全シナリオで評価するために必要
